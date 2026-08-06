@@ -1,6 +1,6 @@
 import Foundation
 
-public struct PagePoint: Sendable, Equatable {
+public struct PagePoint: Codable, Sendable, Equatable {
     public let x: Double
     public let y: Double
 

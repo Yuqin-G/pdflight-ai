@@ -19,6 +19,9 @@ enum IsolatedApplicationLauncher {
         configuration.addsToRecentItems = false
         configuration.createsNewApplicationInstance = true
         configuration.arguments = ["-ApplePersistenceIgnoreState", "YES"]
+        if let readingStatePath = ProcessInfo.processInfo.environment["PDFLIGHT_READING_STATE_FILE"] {
+            configuration.environment["PDFLIGHT_READING_STATE_FILE"] = readingStatePath
+        }
 
         NSWorkspace.shared.open(
             Array(documentURLs),

@@ -12,6 +12,10 @@ enum PDFlightCoreChecks {
         print("PASS: zoom keeps the same page point at the viewport center")
         try returnAdvancesCompletedSearch()
         print("PASS: Return advances a completed search")
+        try readingPositionSurvivesStoreReload()
+        print("PASS: reading position survives a store reload")
+        try readingPositionStorePrunesOldDocuments()
+        print("PASS: reading position store prunes old documents")
         try await equivalentRequestsReuseCache()
         print("PASS: equivalent requests reuse the cached page")
         try await concurrentRequestsShareRender()
@@ -88,6 +92,66 @@ enum PDFlightCoreChecks {
             ) == .startSearch,
             "expected an edited query to start a new search"
         )
+    }
+
+    @MainActor
+    private static func readingPositionSurvivesStoreReload() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdflight-reading-position-\(UUID().uuidString)", isDirectory: true)
+        let stateURL = directory.appendingPathComponent("reading-state.json")
+        let documentURL = URL(fileURLWithPath: "/Users/reader/Papers/example.pdf")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let expected = ReadingPosition(
+            bookmark: DocumentViewportBookmark(
+                pageIndex: 14,
+                point: PagePoint(x: -12.5, y: 318.25)
+            ),
+            zoom: 1.75,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let writer = ReadingPositionStore(fileURL: stateURL)
+        try writer.save(expected, for: documentURL)
+
+        let reader = ReadingPositionStore(fileURL: stateURL)
+        let restored = try reader.position(for: documentURL)
+
+        try check(restored == expected, "expected the exact reading position after reopening the store")
+    }
+
+    @MainActor
+    private static func readingPositionStorePrunesOldDocuments() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdflight-reading-limit-\(UUID().uuidString)", isDirectory: true)
+        let stateURL = directory.appendingPathComponent("reading-state.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = ReadingPositionStore(fileURL: stateURL, maximumDocumentCount: 2)
+        for index in 0..<3 {
+            let position = ReadingPosition(
+                bookmark: DocumentViewportBookmark(
+                    pageIndex: index,
+                    point: PagePoint(x: 0, y: 0)
+                ),
+                zoom: 1,
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+            try store.save(
+                position,
+                for: URL(fileURLWithPath: "/Users/reader/Papers/\(index).pdf")
+            )
+        }
+
+        let reloaded = ReadingPositionStore(fileURL: stateURL, maximumDocumentCount: 2)
+        let oldest = try reloaded.position(
+            for: URL(fileURLWithPath: "/Users/reader/Papers/0.pdf")
+        )
+        let newest = try reloaded.position(
+            for: URL(fileURLWithPath: "/Users/reader/Papers/2.pdf")
+        )
+
+        try check(oldest == nil, "expected the least recently read document to be pruned")
+        try check(newest?.bookmark.pageIndex == 2, "expected the newest document to remain")
     }
 
     private static func textSelectionReturnsTextAndOneHighlightRectPerLine() throws {

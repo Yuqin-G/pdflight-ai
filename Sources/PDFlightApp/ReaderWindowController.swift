@@ -14,6 +14,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
 
     let documentURL: URL
     private let engine: MuPDFDocument
+    private let readingPositionStore: ReadingPositionStore
     private let scheduler: RenderScheduler
     private let pageCount: Int
     private let scrollView = NSScrollView()
@@ -39,6 +40,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private var textTokens: [Int: UUID] = [:]
     private var searchTask: Task<Void, Never>?
     private var suspensionTask: Task<Void, Never>?
+    private var readingPositionSaveTask: Task<Void, Never>?
     private var searchResults: [DocumentSearchHit] = []
     private var activeSearchIndex: Int?
     private var completedSearchQuery: String?
@@ -52,12 +54,18 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private var undoEditStates: [UUID] = []
     private var magnificationAnchor: DocumentViewportZoomAnchor?
     private var isApplyingZoomLayout = false
+    private var hasFinishedInitialLoad = false
     private var outlineWidthConstraints: [NSLayoutConstraint] = []
 
-    init(url: URL, engine: MuPDFDocument) {
+    init(
+        url: URL,
+        engine: MuPDFDocument,
+        readingPositionStore: ReadingPositionStore
+    ) {
         let initialEditState = UUID()
         self.documentURL = url
         self.engine = engine
+        self.readingPositionStore = readingPositionStore
         self.pageCount = engine.pageCount
         self.editState = initialEditState
         self.savedEditState = initialEditState
@@ -91,6 +99,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         textTasks.values.forEach { $0.cancel() }
         searchTask?.cancel()
         suspensionTask?.cancel()
+        readingPositionSaveTask?.cancel()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -323,6 +332,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     }
 
     func windowWillClose(_ notification: Notification) {
+        saveReadingPosition()
         cancelPageWork()
         loadTask?.cancel()
         searchTask?.cancel()
@@ -361,6 +371,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        saveReadingPosition()
         scheduleSuspension()
     }
 
@@ -535,6 +546,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
+                let savedPosition = try? readingPositionStore.position(for: documentURL)
                 let loadedOutline = (try? await engine.outline()) ?? []
                 guard !Task.isCancelled else { return }
                 outlineSidebar.install(loadedOutline)
@@ -550,7 +562,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 guard !Task.isCancelled else { return }
                 pages = loaded
                 canvasView.install(pages: loaded, delegate: self, tool: tool)
-                if shouldFitInitialPage, let first = loaded.first {
+                if let savedPosition, !loaded.isEmpty, savedPosition.zoom.isFinite {
+                    shouldFitInitialPage = false
+                    zoom = min(8, max(0.15, savedPosition.zoom))
+                } else if shouldFitInitialPage, let first = loaded.first {
                     shouldFitInitialPage = false
                     let availableWidth = max(120, scrollView.contentSize.width - 48)
                     zoom = min(2, max(0.15, availableWidth / first.width))
@@ -558,7 +573,21 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 canvasView.layoutPages(zoom: zoom, viewportWidth: scrollView.contentSize.width)
                 zoomLabel.stringValue = "\(Int((zoom * 100).rounded()))%"
                 pageLabel.stringValue = "1 / \(pageCount)"
-                scroll(to: 0)
+                if let savedPosition, !loaded.isEmpty {
+                    let pageIndex = min(
+                        max(0, savedPosition.bookmark.pageIndex),
+                        loaded.count - 1
+                    )
+                    let pageFrame = canvasView.pageViews[pageIndex].frame
+                    let restoredOrigin = savedPosition.bookmark.restoredViewportOrigin(
+                        pageOrigin: PagePoint(x: pageFrame.minX, y: pageFrame.minY),
+                        zoom: zoom
+                    )
+                    scroll(to: pageIndex, viewportOrigin: restoredOrigin)
+                } else {
+                    scroll(to: 0)
+                }
+                hasFinishedInitialLoad = true
                 isSuspended = false
                 updateVisiblePages()
                 if window?.isKeyWindow != true {
@@ -575,6 +604,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     @objc private func clipBoundsChanged(_ notification: Notification) {
         guard !isApplyingZoomLayout else { return }
         updateVisiblePages()
+        scheduleReadingPositionSave()
     }
 
     private func updateVisiblePages() {
@@ -802,6 +832,30 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             viewportOrigin: PagePoint(x: origin.x, y: origin.y),
             zoom: zoom
         )
+    }
+
+    func saveReadingPosition() {
+        readingPositionSaveTask?.cancel()
+        readingPositionSaveTask = nil
+        persistReadingPosition()
+    }
+
+    private func scheduleReadingPositionSave() {
+        guard hasFinishedInitialLoad else { return }
+        readingPositionSaveTask?.cancel()
+        readingPositionSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(750))
+            guard !Task.isCancelled, let self else { return }
+            readingPositionSaveTask = nil
+            persistReadingPosition()
+        }
+    }
+
+    private func persistReadingPosition() {
+        guard hasFinishedInitialLoad,
+              let bookmark = currentNavigationBookmark() else { return }
+        let position = ReadingPosition(bookmark: bookmark, zoom: zoom)
+        try? readingPositionStore.save(position, for: documentURL)
     }
 
     private func setZoom(

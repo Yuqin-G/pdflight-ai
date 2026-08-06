@@ -4,7 +4,14 @@
   <img src="Resources/PDFlightIcon.png" width="160" alt="PDFlight icon">
 </p>
 
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
+
 PDFlight is a small, native macOS PDF reader built for papers. It uses an AppKit shell and a PDF-only MuPDF build instead of PDFKit's `PDFView` or a web view.
+
+> [!NOTE]
+> **Memory benchmark:** with 10 PDFs open, PDFlight averaged **165.2 MiB** versus Skim's **934.6 MiB**; with 30 PDFs, PDFlight averaged **338.2 MiB** versus Skim's **2,595.6 MiB**. That is an **82.3%–87.0% reduction** in settled physical footprint. See the [methodology and raw trials](BENCHMARK.md); this is an idle many-document benchmark, not a scrolling stress test.
 
 Current features:
 
@@ -18,12 +25,17 @@ Current features:
 - password-protected PDF opening;
 - internal PDF links with exact pre-link viewport restoration via Command-Left Arrow;
 - external links through the default browser;
+- reopening a PDF restores its last page, precise viewport position, and zoom;
 - Retina rendering, fit-width, keyboard/pinch zoom, and nonblank progressive redraw while zooming;
 - different PDFs grouped as tabs in one window by default;
 - text-aligned highlights written back as standard PDF annotations;
 - embedded PDF text-note annotations;
 - Command-Z undo for the most recent highlight or text note;
 - direct save with a close-time unsaved-changes warning.
+
+## Download
+
+Download the latest Apple Silicon build from [GitHub Releases](https://github.com/Yuqin-G/pdflight/releases/latest). PDFlight requires macOS 14 or later. The current open-source build is ad-hoc signed; on first launch, use **Control-click → Open** if macOS asks you to confirm the unidentified developer.
 
 ## Build
 
@@ -70,7 +82,7 @@ duti -s dev.pdflight.reader com.adobe.pdf shell
 
 ## Architecture
 
-`DocumentEngine` is the document seam: page inspection, document outlines, text extraction, search, rendering, links, annotations, passwords, memory release, and save. `MuPDFDocument` is the first adapter. `RenderScheduler` owns in-flight request coalescing and a byte-bounded LRU cache. `DocumentCanvasView` virtualizes page bitmaps by retaining rendered content only near the viewport. AppKit only talks to those interfaces.
+`DocumentEngine` is the document seam: page inspection, document outlines, text extraction, search, rendering, links, annotations, passwords, memory release, and save. `MuPDFDocument` is the first adapter. `RenderScheduler` owns in-flight request coalescing and a byte-bounded LRU cache. `DocumentCanvasView` virtualizes page bitmaps by retaining rendered content only near the viewport. `ReadingPositionStore` atomically persists recent document positions to local JSON. AppKit only talks to those interfaces.
 
 ## Benchmark
 

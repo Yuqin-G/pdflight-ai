@@ -5,6 +5,23 @@ import PDFlightMuPDF
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var readers: [ReaderWindowController] = []
+    private let readingPositionStore = ReadingPositionStore(fileURL: AppDelegate.readingStateURL)
+
+    private static var readingStateURL: URL {
+        if let overridePath = ProcessInfo.processInfo.environment["PDFLIGHT_READING_STATE_FILE"],
+           !overridePath.isEmpty {
+            return URL(fileURLWithPath: overridePath)
+        }
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        let directoryName = Bundle.main.bundleIdentifier ?? "dev.pdflight.reader"
+        return applicationSupport
+            .appendingPathComponent(directoryName, isDirectory: true)
+            .appendingPathComponent("reading-state.json")
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -24,6 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        readers.forEach { $0.saveReadingPosition() }
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
@@ -118,7 +139,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             guard let engine = try openEngine(for: normalizedURL) else { return }
             let tabHost = keyReader?.window ?? readers.last?.window
-            let reader = ReaderWindowController(url: normalizedURL, engine: engine)
+            let reader = ReaderWindowController(
+                url: normalizedURL,
+                engine: engine,
+                readingPositionStore: readingPositionStore
+            )
             reader.onClose = { [weak self, weak reader] in
                 guard let self, let reader else { return }
                 self.readers.removeAll { $0 === reader }

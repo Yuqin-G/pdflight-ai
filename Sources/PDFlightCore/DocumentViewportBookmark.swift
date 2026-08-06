@@ -1,4 +1,4 @@
-public struct DocumentViewportBookmark: Sendable, Equatable {
+public struct DocumentViewportBookmark: Codable, Sendable, Equatable {
     public let pageIndex: Int
     public let point: PagePoint
 
