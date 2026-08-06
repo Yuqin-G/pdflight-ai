@@ -1,0 +1,5 @@
+application,round,windows,minimum_settle_seconds,stabilized_after_seconds,stable,samples,mean_phys_mib,min_phys_mib,max_phys_mib
+PDFlight,1,30,10,14,yes,5,447.6,447.6,447.6
+Skim,1,30,10,14,yes,5,2604.2,2569.9,2640.2
+Skim,2,30,10,14,yes,5,2587.0,2563.6,2617.0
+PDFlight,2,30,10,18,yes,5,228.9,228.8,228.9
