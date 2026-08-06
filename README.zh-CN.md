@@ -10,8 +10,12 @@
 
 PDFlight 是一款面向论文阅读的轻量级原生 macOS PDF 阅读器。它使用 AppKit 界面和仅启用 PDF 的 MuPDF 构建，不依赖 PDFKit 的 `PDFView`，也不使用网页视图。
 
-> [!NOTE]
-> **内存基准：**打开 10 个 PDF 时，PDFlight 平均占用 **165.2 MiB**，Skim 为 **934.6 MiB**；打开 30 个 PDF 时，PDFlight 平均占用 **338.2 MiB**，Skim 为 **2,595.6 MiB**。PDFlight 的稳定物理内存占用降低了 **82.3%–87.0%**。完整测试方法和原始数据见 [BENCHMARK.md](BENCHMARK.md)；这是多文档静置测试，不是连续滚动压力测试。
+**Extremely Light**
+
+| 打开的 PDF 数量 | PDFlight | Skim |
+| ---: | ---: | ---: |
+| 10 | 165.2 MiB | 934.6 MiB |
+| 30 | 338.2 MiB | 2,595.6 MiB |
 
 当前功能：
 
@@ -84,9 +88,6 @@ duti -s dev.pdflight.reader com.adobe.pdf shell
 
 `DocumentEngine` 是文档 seam，负责页面检查、目录、文字提取、搜索、渲染、链接、批注、密码、内存释放和保存。`MuPDFDocument` 是第一个 adapter。`RenderScheduler` 负责合并进行中的相同请求，并维护按字节限制的 LRU 缓存。`DocumentCanvasView` 通过只保留视口附近的渲染内容实现页面位图虚拟化。AppKit 仅通过这些 interface 与底层交互。`ReadingPositionStore` 使用原子 JSON 文件保存最近文档的阅读位置。
 
-## 性能测试
-
-参阅 [`BENCHMARK.md`](BENCHMARK.md)。其中包含使用 macOS physical footprint、等待 10 秒稳定期后得到的 10/30 PDF 可复现对比、原始试验结果和完整方法。
 
 ## 许可证
 

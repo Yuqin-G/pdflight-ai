@@ -10,8 +10,12 @@
 
 PDFlight is a small, native macOS PDF reader built for papers. It uses an AppKit shell and a PDF-only MuPDF build instead of PDFKit's `PDFView` or a web view.
 
-> [!NOTE]
-> **Memory benchmark:** with 10 PDFs open, PDFlight averaged **165.2 MiB** versus Skim's **934.6 MiB**; with 30 PDFs, PDFlight averaged **338.2 MiB** versus Skim's **2,595.6 MiB**. That is an **82.3%–87.0% reduction** in settled physical footprint. See the [methodology and raw trials](BENCHMARK.md); this is an idle many-document benchmark, not a scrolling stress test.
+**Extremely Light**
+
+| Open PDFs | PDFlight | Skim |
+| ---: | ---: | ---: |
+| 10 | 165.2 MiB | 934.6 MiB |
+| 30 | 338.2 MiB | 2,595.6 MiB |
 
 Current features:
 
@@ -84,9 +88,6 @@ duti -s dev.pdflight.reader com.adobe.pdf shell
 
 `DocumentEngine` is the document seam: page inspection, document outlines, text extraction, search, rendering, links, annotations, passwords, memory release, and save. `MuPDFDocument` is the first adapter. `RenderScheduler` owns in-flight request coalescing and a byte-bounded LRU cache. `DocumentCanvasView` virtualizes page bitmaps by retaining rendered content only near the viewport. `ReadingPositionStore` atomically persists recent document positions to local JSON. AppKit only talks to those interfaces.
 
-## Benchmark
-
-See [`BENCHMARK.md`](BENCHMARK.md) for reproducible 10- and 30-PDF comparisons with Skim, using macOS physical footprint after a 10-second settling period.
 
 ## License
 
