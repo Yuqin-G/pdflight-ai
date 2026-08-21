@@ -20,7 +20,15 @@ mkdir -p "$STAGING_APP/Contents/MacOS" "$STAGING_APP/Contents/Resources" "$PROJE
 cp "$BIN_DIR/PDFlight" "$STAGING_APP/Contents/MacOS/PDFlight"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$STAGING_APP/Contents/Info.plist"
 cp "$PROJECT_ROOT/Resources/PDFlight.icns" "$STAGING_APP/Contents/Resources/PDFlight.icns"
-codesign --force --sign - "$STAGING_APP" >/dev/null
+for resource_bundle in "$BIN_DIR"/*.bundle(N); do
+    cp -R "$resource_bundle" "$STAGING_APP/Contents/Resources/"
+done
+mkdir -p "$STAGING_APP/Contents/Resources/ThirdParty"
+cp "$PROJECT_ROOT/.build/checkouts/iosMath/LICENSE" \
+    "$STAGING_APP/Contents/Resources/ThirdParty/iosMath-LICENSE.txt"
+cp "$PROJECT_ROOT/.build/checkouts/iosMath/iosMath/fonts/GUST-FONT-LICENSE.txt" \
+    "$STAGING_APP/Contents/Resources/ThirdParty/GUST-FONT-LICENSE.txt"
+codesign --force --deep --sign - "$STAGING_APP" >/dev/null
 
 rm -rf "$APP_ROOT"
 mv "$STAGING_APP" "$APP_ROOT"

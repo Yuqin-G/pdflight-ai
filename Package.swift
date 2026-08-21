@@ -12,13 +12,25 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "PDFlightCore", targets: ["PDFlightCore"]),
+        .library(name: "PDFlightAI", targets: ["PDFlightAI"]),
         .library(name: "PDFlightMuPDF", targets: ["PDFlightMuPDF"]),
         .executable(name: "PDFlight", targets: ["PDFlightApp"]),
         .executable(name: "PDFlightCoreChecks", targets: ["PDFlightCoreChecks"]),
+        .executable(name: "PDFlightAIChecks", targets: ["PDFlightAIChecks"]),
         .executable(name: "PDFlightMuPDFChecks", targets: ["PDFlightMuPDFChecks"])
+    ],
+    dependencies: [
+        .package(url: "https://github.com/kostub/iosMath.git", from: "2.1.0")
     ],
     targets: [
         .target(name: "PDFlightCore"),
+        .target(
+            name: "PDFlightAI",
+            dependencies: ["PDFlightCore"],
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
+        ),
         .target(
             name: "CMuPDF",
             path: "Sources/CMuPDF",
@@ -49,6 +61,10 @@ let package = Package(
             name: "PDFlightCoreChecks",
             dependencies: ["PDFlightCore"]
         ),
+        .executableTarget(
+            name: "PDFlightAIChecks",
+            dependencies: ["PDFlightCore", "PDFlightAI"]
+        ),
         .target(
             name: "PDFlightMuPDF",
             dependencies: ["PDFlightCore", "CMuPDF"]
@@ -64,7 +80,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "PDFlightApp",
-            dependencies: ["PDFlightCore", "PDFlightMuPDF"],
+            dependencies: [
+                "PDFlightCore",
+                "PDFlightAI",
+                "PDFlightMuPDF",
+                .product(name: "iosMath", package: "iosMath")
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreGraphics")

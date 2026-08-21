@@ -16,6 +16,10 @@ enum PDFlightCoreChecks {
         print("PASS: reading position survives a store reload")
         try readingPositionStorePrunesOldDocuments()
         print("PASS: reading position store prunes old documents")
+        try await paperLibraryPersistsNestedCollectionsAndAssignments()
+        print("PASS: paper library persists nested collections and paper assignments")
+        try legacyPaperLibraryPapersGainAutomaticAliases()
+        print("PASS: legacy paper-library JSON gains automatic display aliases")
         try await equivalentRequestsReuseCache()
         print("PASS: equivalent requests reuse the cached page")
         try await concurrentRequestsShareRender()
@@ -24,6 +28,80 @@ enum PDFlightCoreChecks {
         print("PASS: page invalidation forces a fresh render")
         try await cacheEvictsLeastRecentlyUsedPage()
         print("PASS: byte budget evicts the least recently used page")
+    }
+
+    private static func paperLibraryPersistsNestedCollectionsAndAssignments() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdflight-paper-library-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("paper-library.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writer = PaperLibraryStore(fileURL: fileURL)
+        let vision = try await writer.createCollection(name: "Vision", parentID: nil)
+        let reasoning = try await writer.createCollection(name: "Reasoning", parentID: vision.id)
+        let paper = try await writer.addPaper(
+            at: URL(
+                fileURLWithPath: "/Users/reader/Papers/Ming 等 - 2026 - Yesterday's Shield, Today's Spear.pdf"
+            ),
+            to: nil
+        )
+        try check(
+            paper.displayTitle == "Yesterday's Shield, Today's Spear",
+            "expected author and year prefixes to be omitted from the automatic display alias"
+        )
+        try await writer.setPaperDisplayAlias(paper.id, to: "Shield and Spear")
+        try await writer.movePaper(paper.id, to: reasoning.id)
+
+        let reader = PaperLibraryStore(fileURL: fileURL)
+        let snapshot = try await reader.snapshot()
+        try check(snapshot.collections.count == 2, "expected both collection levels after reload")
+        try check(
+            snapshot.collections.first { $0.id == reasoning.id }?.parentID == vision.id,
+            "expected the nested collection to retain its parent"
+        )
+        try check(
+            snapshot.papers.first { $0.id == paper.id }?.collectionID == reasoning.id,
+            "expected the paper assignment to survive reload"
+        )
+        try check(
+            snapshot.papers.first { $0.id == paper.id }?.displayTitle == "Shield and Spear",
+            "expected a custom paper display alias to survive reload"
+        )
+        try await reader.setPaperDisplayAlias(paper.id, to: "  ")
+        let resetSnapshot = try await reader.snapshot()
+        try check(
+            resetSnapshot.papers.first { $0.id == paper.id }?.displayTitle
+                == "Yesterday's Shield, Today's Spear",
+            "expected clearing a custom alias to restore the automatic display alias"
+        )
+
+        do {
+            try await reader.moveCollection(vision.id, to: reasoning.id)
+            throw CheckFailure("expected collection cycles to be rejected")
+        } catch PaperLibraryError.collectionCycle {
+            // Expected.
+        }
+    }
+
+    private static func legacyPaperLibraryPapersGainAutomaticAliases() throws {
+        let data = Data("""
+        {
+          "id": "legacy-paper",
+          "title": "Ming 等 - 2026 - Yesterday's Shield, Today's Spear",
+          "path": "/Users/reader/Papers/legacy.pdf",
+          "collectionID": null,
+          "addedAt": "2026-08-20T12:00:00Z",
+          "lastOpenedAt": "2026-08-20T12:00:00Z"
+        }
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let paper = try decoder.decode(PaperLibraryPaper.self, from: data)
+        try check(paper.displayAlias == nil, "expected legacy JSON to decode without a stored alias")
+        try check(
+            paper.displayTitle == "Yesterday's Shield, Today's Spear",
+            "expected a legacy paper to receive its derived display alias"
+        )
     }
 
     private static func navigationBookmarkRestoresCenteredViewport() throws {

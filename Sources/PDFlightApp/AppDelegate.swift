@@ -1,11 +1,37 @@
 import AppKit
+import PDFlightAI
 import PDFlightCore
 import PDFlightMuPDF
+
+enum ReaderCopyDestination: Equatable {
+    case textEditor
+    case pdfSelection
+    case none
+}
+
+enum ReaderCopyRouting {
+    static func destination(
+        editorSelectionLength: Int?,
+        hasPDFSelection: Bool
+    ) -> ReaderCopyDestination {
+        if let editorSelectionLength, editorSelectionLength > 0 {
+            return .textEditor
+        }
+        if hasPDFSelection {
+            return .pdfSelection
+        }
+        return .none
+    }
+}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var readers: [ReaderWindowController] = []
     private let readingPositionStore = ReadingPositionStore(fileURL: AppDelegate.readingStateURL)
+    private let paperLibraryStore = PaperLibraryStore(fileURL: AppDelegate.paperLibraryURL)
+    private let aiChatHistoryStore = AIChatHistoryStore(directoryURL: AppDelegate.aiHistoryDirectoryURL)
+    private let aiPromptTemplateStore = AIPromptTemplateStore(fileURL: AppDelegate.aiPromptTemplatesURL)
+    private let aiConfigurationStore = AppDelegate.makeAIConfigurationStore()
 
     private static var readingStateURL: URL {
         if let overridePath = ProcessInfo.processInfo.environment["PDFLIGHT_READING_STATE_FILE"],
@@ -23,7 +49,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .appendingPathComponent("reading-state.json")
     }
 
+    private static var aiHistoryDirectoryURL: URL {
+        if let overridePath = ProcessInfo.processInfo.environment["PDFLIGHT_AI_HISTORY_DIRECTORY"],
+           !overridePath.isEmpty {
+            return URL(fileURLWithPath: overridePath, isDirectory: true)
+        }
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        let directoryName = Bundle.main.bundleIdentifier ?? "dev.pdflight.reader"
+        return applicationSupport
+            .appendingPathComponent(directoryName, isDirectory: true)
+            .appendingPathComponent("ai-chats", isDirectory: true)
+    }
+
+    private static var aiPromptTemplatesURL: URL {
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        let directoryName = Bundle.main.bundleIdentifier ?? "dev.pdflight.reader"
+        return applicationSupport
+            .appendingPathComponent(directoryName, isDirectory: true)
+            .appendingPathComponent("prompt-templates.json")
+    }
+
+    private static var paperLibraryURL: URL {
+        if let overridePath = ProcessInfo.processInfo.environment["PDFLIGHT_PAPER_LIBRARY_FILE"],
+           !overridePath.isEmpty {
+            return URL(fileURLWithPath: overridePath)
+        }
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        let directoryName = Bundle.main.bundleIdentifier ?? "dev.pdflight.reader"
+        return applicationSupport
+            .appendingPathComponent(directoryName, isDirectory: true)
+            .appendingPathComponent("paper-library.json")
+    }
+
+    private static func makeAIConfigurationStore() -> AIConfigurationStore {
+        let environment = ProcessInfo.processInfo.environment
+        let defaults: UserDefaults
+        if let suiteName = environment["PDFLIGHT_AI_SETTINGS_SUITE"],
+           !suiteName.isEmpty,
+           let suite = UserDefaults(suiteName: suiteName) {
+            defaults = suite
+        } else {
+            defaults = .standard
+        }
+        let service = environment["PDFLIGHT_AI_KEYCHAIN_SERVICE"]
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? "dev.pdflight.reader.ai"
+        return AIConfigurationStore(
+            userDefaults: defaults,
+            secretStore: KeychainAISecretStore(service: service)
+        )
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        IOSMathResourceLocator.install()
         installMainMenu()
 
         let arguments = CommandLine.arguments.dropFirst().map(URL.init(fileURLWithPath:))
@@ -66,8 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func undoAnnotation(_ sender: Any?) {
-        if let editor = NSApplication.shared.keyWindow?.firstResponder as? NSTextView,
-           editor.isFieldEditor {
+        if let editor = NSApplication.shared.keyWindow?.firstResponder as? NSTextView {
             if editor.undoManager?.canUndo == true {
                 editor.undoManager?.undo()
             } else {
@@ -115,7 +204,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func copySelection(_ sender: Any?) {
-        keyReader?.copySelection(sender)
+        let editor = NSApplication.shared.keyWindow?.firstResponder as? NSTextView
+        switch ReaderCopyRouting.destination(
+            editorSelectionLength: editor?.selectedRange().length,
+            hasPDFSelection: keyReader?.hasCopyablePDFSelection == true
+        ) {
+        case .textEditor:
+            editor?.copy(sender)
+        case .pdfSelection:
+            keyReader?.copySelection(sender)
+        case .none:
+            NSSound.beep()
+        }
     }
 
     @objc func nextSearchResult(_ sender: Any?) {
@@ -126,13 +226,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyReader?.previousSearchResult(sender)
     }
 
+    @objc func toggleAI(_ sender: Any?) {
+        keyReader?.toggleAI(sender)
+    }
+
+    @objc func configureAI(_ sender: Any?) {
+        keyReader?.configureAI(sender)
+    }
+
     private var keyReader: ReaderWindowController? {
         readers.first { $0.window?.isKeyWindow == true }
     }
 
     private func open(_ url: URL) {
+        open(url, selectingAIConversation: nil)
+    }
+
+    private func open(_ url: URL, selectingAIConversation conversationID: String?) {
         let normalizedURL = url.standardizedFileURL
         if let existing = readers.first(where: { $0.documentURL.standardizedFileURL == normalizedURL }) {
+            if let conversationID { existing.selectAIConversation(conversationID) }
             existing.window?.makeKeyAndOrderFront(nil)
             return
         }
@@ -142,12 +255,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let reader = ReaderWindowController(
                 url: normalizedURL,
                 engine: engine,
-                readingPositionStore: readingPositionStore
+                readingPositionStore: readingPositionStore,
+                paperLibraryStore: paperLibraryStore,
+                aiChatHistoryStore: aiChatHistoryStore,
+                aiPromptTemplateStore: aiPromptTemplateStore,
+                aiConfigurationStore: aiConfigurationStore
             )
             reader.onClose = { [weak self, weak reader] in
                 guard let self, let reader else { return }
                 self.readers.removeAll { $0 === reader }
             }
+            reader.onNavigateAIHistory = { [weak self] URL, conversationID in
+                self?.open(URL, selectingAIConversation: conversationID)
+            }
+            reader.onOpenPaperFromLibrary = { [weak self] url in
+                self?.open(url)
+            }
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    _ = try await paperLibraryStore.addPaper(at: normalizedURL, to: nil)
+                    NotificationCenter.default.post(name: .paperLibraryDidChange, object: nil)
+                } catch {
+                    // Opening the PDF remains successful even if the optional library index cannot be saved.
+                }
+            }
+            if let conversationID { reader.selectAIConversation(conversationID) }
             readers.append(reader)
             if let tabHost, let newWindow = reader.window {
                 tabHost.addTabbedWindow(newWindow, ordered: .above)
@@ -209,6 +342,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applicationItem.submenu = applicationMenu
         applicationMenu.addItem(withTitle: "About PDFlight", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         applicationMenu.addItem(.separator())
+        let aiSettings = applicationMenu.addItem(
+            withTitle: "AI Settings…",
+            action: #selector(configureAI(_:)),
+            keyEquivalent: ","
+        )
+        aiSettings.target = self
+        applicationMenu.addItem(.separator())
         applicationMenu.addItem(withTitle: "Quit PDFlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let fileItem = NSMenuItem()
@@ -251,8 +391,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let navigateMenu = NSMenu(title: "Navigate")
         navigateItem.submenu = navigateMenu
         addMenuItem(to: navigateMenu, title: "Back", action: #selector(goBack(_:)), key: String(UnicodeScalar(NSLeftArrowFunctionKey)!), modifiers: [.command])
-        addMenuItem(to: navigateMenu, title: "Previous Page", action: #selector(previousPage(_:)), key: String(UnicodeScalar(NSLeftArrowFunctionKey)!), modifiers: [])
-        addMenuItem(to: navigateMenu, title: "Next Page", action: #selector(nextPage(_:)), key: String(UnicodeScalar(NSRightArrowFunctionKey)!), modifiers: [])
+        addMenuItem(to: navigateMenu, title: "Previous Page", action: #selector(previousPage(_:)), key: "", modifiers: [])
+        addMenuItem(to: navigateMenu, title: "Next Page", action: #selector(nextPage(_:)), key: "", modifiers: [])
 
         let viewItem = NSMenuItem()
         mainMenu.addItem(viewItem)
@@ -262,6 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addMenuItem(to: viewMenu, title: "Zoom Out", action: #selector(zoomOut(_:)), key: "-", modifiers: [.command])
         addMenuItem(to: viewMenu, title: "Fit Width", action: #selector(fitWidth(_:)), key: "0", modifiers: [.command])
         viewMenu.addItem(.separator())
+        addMenuItem(to: viewMenu, title: "Ask PDF", action: #selector(toggleAI(_:)), key: "a", modifiers: [.command, .shift])
         addMenuItem(to: viewMenu, title: "Text Note", action: #selector(toggleNote(_:)), key: "n", modifiers: [])
     }
 

@@ -11,6 +11,11 @@ protocol PageViewDelegate: AnyObject {
     func pageView(_ pageView: PageView, activated link: DocumentLink)
     func pageView(_ pageView: PageView, requestedNoteAt point: PagePoint)
     func pageView(_ pageView: PageView, magnifiedBy amount: CGFloat, phase: NSEvent.Phase)
+    func pageView(
+        _ pageView: PageView,
+        didFinishSelecting selection: DocumentTextSelection?,
+        selectionBounds: NSRect?
+    )
 }
 
 @MainActor
@@ -48,6 +53,7 @@ final class PageView: NSView {
     private var selectionAnchor: Int?
     private var selectionEnd: Int?
     private var pendingLink: DocumentLink?
+    private var selectionWasDragged = false
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -101,6 +107,8 @@ final class PageView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        selectionWasDragged = false
+        delegate?.pageView(self, didFinishSelecting: nil, selectionBounds: nil)
         let point = clamped(convert(event.locationInWindow, from: nil))
         let pagePoint = PagePoint(x: point.x / zoom, y: point.y / zoom)
 
@@ -124,6 +132,7 @@ final class PageView: NSView {
         let point = clamped(convert(event.locationInWindow, from: nil))
         switch tool {
         case .select:
+            selectionWasDragged = true
             pendingLink = nil
             let pagePoint = PagePoint(x: point.x / zoom, y: point.y / zoom)
             if let index = nearestGlyphIndex(to: pagePoint) {
@@ -142,8 +151,15 @@ final class PageView: NSView {
         case .select:
             if let pendingLink {
                 delegate?.pageView(self, activated: pendingLink)
+            } else if selectionWasDragged {
+                delegate?.pageView(
+                    self,
+                    didFinishSelecting: textSelection,
+                    selectionBounds: selectionBoundsInView
+                )
             }
             pendingLink = nil
+            selectionWasDragged = false
         case .note:
             break
         }
@@ -170,10 +186,13 @@ final class PageView: NSView {
         return textPage.textSelection(from: selectionAnchor, through: selectionEnd)
     }
 
-    func clearSelection() {
+    func clearSelection(notifyDelegate: Bool = true) {
         selectionAnchor = nil
         selectionEnd = nil
         overlayView.needsDisplay = true
+        if notifyDelegate {
+            delegate?.pageView(self, didFinishSelecting: nil, selectionBounds: nil)
+        }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -191,6 +210,15 @@ final class PageView: NSView {
         let lower = max(0, min(selectionAnchor, selectionEnd))
         let upper = min(glyphs.count - 1, max(selectionAnchor, selectionEnd))
         return glyphs[lower...upper]
+    }
+
+    private var selectionBoundsInView: NSRect? {
+        let rects = selectedGlyphs.map { viewRect(for: $0.rect) }
+        guard var result = rects.first else { return nil }
+        for rect in rects.dropFirst() {
+            result = result.union(rect)
+        }
+        return result
     }
 
     private func nearestGlyphIndex(to point: PagePoint) -> Int? {
