@@ -1,4 +1,4 @@
-# PDFlight
+# PDFlight AI
 
 <p align="center">
   <img src="Resources/PDFlightIcon.png" width="160" alt="PDFlight 图标">
@@ -8,7 +8,7 @@
   <a href="README.md">English</a> · <strong>简体中文</strong>
 </p>
 
-PDFlight 是一款面向论文阅读的轻量级原生 macOS PDF 阅读器。它使用 AppKit 界面和仅启用 PDF 的 MuPDF 构建，不依赖 PDFKit 的 `PDFView`，也不使用网页视图。
+PDFlight AI 是一款极轻量的原生 macOS AI 论文阅读器，内置完整的 **Ask PDF** 工作区。它将 AppKit 界面、仅启用 PDF 的 MuPDF 引擎、按论文隔离的 AI 对话、可编辑 Prompt 模式和原生 Markdown/LaTeX 渲染结合起来，同时不使用 WebView、embedding 或 RAG。
 
 **Extremely Light**
 
@@ -59,7 +59,7 @@ AI 功能刻意保持轻量：不建立 embedding、不运行 RAG、不开放 MC
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/Yuqin-G/pdflight/releases/latest) 下载最新的 Apple Silicon 构建。PDFlight 要求 macOS 14 或更高版本。当前开源构建使用 ad-hoc 签名；如果 macOS 首次启动时提示无法确认开发者，请按住 Control 点击应用并选择“打开”。
+从 [GitHub Releases](https://github.com/Yuqin-G/pdflight-ai/releases/latest) 下载最新的 Apple Silicon 构建。PDFlight 要求 macOS 14 或更高版本。当前开源构建使用 ad-hoc 签名；如果 macOS 首次启动时提示无法确认开发者，请按住 Control 点击应用并选择“打开”。
 
 ## 构建
 

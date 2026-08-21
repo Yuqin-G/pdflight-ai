@@ -1,4 +1,4 @@
-# PDFlight
+# PDFlight AI
 
 <p align="center">
   <img src="Resources/PDFlightIcon.png" width="160" alt="PDFlight icon">
@@ -8,7 +8,7 @@
   <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-PDFlight is a small, native macOS PDF reader built for papers. It uses an AppKit shell and a PDF-only MuPDF build instead of PDFKit's `PDFView` or a web view.
+PDFlight AI is an extremely light, native macOS paper reader with an integrated **Ask PDF** workspace. It combines an AppKit interface and PDF-only MuPDF engine with per-paper AI conversations, editable prompt modes, and native Markdown/LaTeX rendering—without a web view, embeddings, or RAG.
 
 **Extremely Light**
 
@@ -59,7 +59,7 @@ The left sidebar opens to **Library** by default and can switch to the current P
 
 ## Download
 
-Download the latest Apple Silicon build from [GitHub Releases](https://github.com/Yuqin-G/pdflight/releases/latest). PDFlight requires macOS 14 or later. The current open-source build is ad-hoc signed; on first launch, use **Control-click → Open** if macOS asks you to confirm the unidentified developer.
+Download the latest Apple Silicon build from [GitHub Releases](https://github.com/Yuqin-G/pdflight-ai/releases/latest). PDFlight requires macOS 14 or later. The current open-source build is ad-hoc signed; on first launch, use **Control-click → Open** if macOS asks you to confirm the unidentified developer.
 
 ## Build
 
