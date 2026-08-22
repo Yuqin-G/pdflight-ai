@@ -69,6 +69,28 @@ enum PDFlightAIChecks {
             ],
             "expected unmatched delimiters to stay visible"
         )
+
+        let multilineCasesLatex = #"""
+        r = \begin{cases}
+        1, & \left| \hat{d} - d \right| < \epsilon \\
+        0, & \text{otherwise}
+        \end{cases}
+        """#
+        try check(
+            AIMessageContentParser.segments(in: """
+            $$
+            \(multilineCasesLatex)
+            $$
+            """) == [
+                .math(
+                    latex: multilineCasesLatex
+                        .components(separatedBy: "\n")
+                        .joined(separator: " "),
+                    display: true
+                )
+            ],
+            "expected a multiline cases environment between standalone $$ delimiters to render as one display formula"
+        )
         try check(
             AIMessageContentParser.segments(in: "Broken $x 中文。 $ then $y_i = x_i^2$") == [
                 .text("Broken $x 中文。 $ then "),

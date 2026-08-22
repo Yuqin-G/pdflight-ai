@@ -12,12 +12,14 @@ enum PDFlightAppSelfChecks {
     private static let labeledGRPOLatex = """
     \\mathcal{J}_{GRPO}(\\theta) = \\mathbb{E} \\left[ \\frac{1}{G} \\sum_{i=1}^G \\frac{1}{|o_i|} \\sum_{t=1}^{|o_i|} \\left( \\underbrace{\\min \\left( \\rho_{i,t} \\hat{A}_i, \\text{clip}(\\rho_{i,t}, 1-\\epsilon, 1+\\epsilon) \\hat{A}_i \\right)}_{\\text{策略优化部分 (类似 PPO)}} - \\underbrace{\\beta \\mathbb{D}_{KL}(\\pi_\\theta || \\pi_{ref})}_{\\text{KL 散度惩罚}} \\right) \\right]
     """
+    private static let casesLatex = #"r = \begin{cases} 1, & \left| \hat{d} - d \right| < \epsilon \\ 0, & \text{otherwise} \end{cases}"#
 
     static func mathRendering() throws {
         IOSMathResourceLocator.install()
         let formulas = [
             "r_n^{\\text{final}} =",
             "W_{ij} = \\exp(-d^2(f_i, f_j)/2",
+            casesLatex,
             labeledGRPOLatex
         ]
         for formula in formulas {
@@ -59,15 +61,22 @@ enum PDFlightAppSelfChecks {
                 description: "The PDF selection action bar is missing copy, highlight, or Ask AI"
             )
         }
-        let placementContainer = NSRect(x: 0, y: 0, width: 700, height: 500)
+        let placementContainer = NSRect(x: 0, y: 0, width: 1_000, height: 700)
+        let selectionAnchor = NSRect(x: 300, y: 350, width: 100, height: 30)
         let actionFrame = PDFSelectionActionBarPlacement.frame(
-            anchor: NSRect(x: 650, y: 470, width: 40, height: 18),
+            anchor: selectionAnchor,
             in: placementContainer,
             barSize: PDFSelectionActionBar.preferredSize
         )
         guard placementContainer.insetBy(dx: 9, dy: 9).contains(actionFrame) else {
             throw AppSelfCheckFailure(
                 description: "The PDF selection action bar can escape the document pane"
+            )
+        }
+        guard actionFrame.minX >= selectionAnchor.maxX + PDFSelectionActionBarPlacement.gap - 0.5,
+              actionFrame.maxY <= selectionAnchor.minY - PDFSelectionActionBarPlacement.gap + 0.5 else {
+            throw AppSelfCheckFailure(
+                description: "The PDF selection action bar is not anchored at the selection's lower-right corner"
             )
         }
 
@@ -406,6 +415,30 @@ enum PDFlightAppSelfChecks {
         guard askSidebar.hasScrollableDisplayMathForLayoutCheck(id: displayMath.id) else {
             throw AppSelfCheckFailure(
                 description: "Wide display math is clipped instead of horizontally scrollable"
+            )
+        }
+
+        let multilineCases = AIChatMessage(
+            id: "multiline-cases-check",
+            role: .assistant,
+            content: #"""
+            在 SFT 之后，可以设置容差：
+
+            $$
+            r = \begin{cases}
+            1, & \left| \hat{d} - d \right| < \epsilon \\
+            0, & \text{otherwise}
+            \end{cases}
+            $$
+
+            或者使用平滑奖励。
+            """#
+        )
+        askSidebar.install([multilineCases])
+        guard askSidebar.renderedMathLatexForLayoutCheck(id: multilineCases.id) == [casesLatex],
+              !askSidebar.renderedMessageTextForLayoutCheck(id: multilineCases.id).contains("$$") else {
+            throw AppSelfCheckFailure(
+                description: "Standalone multiline $$ cases remain visible instead of rendering as one formula"
             )
         }
 

@@ -7,16 +7,14 @@ enum PDFSelectionActionBarPlacement {
     static func frame(anchor: NSRect, in container: NSRect, barSize: NSSize) -> NSRect {
         let minimumX = container.minX + edgeInset
         let maximumX = max(minimumX, container.maxX - edgeInset - barSize.width)
-        let centeredX = anchor.midX - barSize.width / 2
-        let x = min(max(centeredX, minimumX), maximumX)
+        let lowerRightX = anchor.maxX + gap
+        let x = min(max(lowerRightX, minimumX), maximumX)
 
-        let aboveY = anchor.maxY + gap
         let belowY = anchor.minY - gap - barSize.height
+        let aboveY = anchor.maxY + gap
         let minimumY = container.minY + edgeInset
         let maximumY = max(minimumY, container.maxY - edgeInset - barSize.height)
-        let preferredY = aboveY + barSize.height <= container.maxY - edgeInset
-            ? aboveY
-            : belowY
+        let preferredY = belowY >= minimumY ? belowY : aboveY
         let y = min(max(preferredY, minimumY), maximumY)
         return NSRect(origin: NSPoint(x: x, y: y), size: barSize)
     }

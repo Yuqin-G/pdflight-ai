@@ -42,7 +42,10 @@ public enum AIMessageContentParser {
 
             if let closingRange {
                 let rawLatex = String(content[bodyStart..<closingRange.lowerBound])
-                let latex = rawLatex.trimmingCharacters(in: .whitespacesAndNewlines)
+                let latex = normalizedLatex(
+                    rawLatex,
+                    display: opening.delimiter.display
+                )
                 let hasCleanInlineBoundary = opening.delimiter.opening != "$" || rawLatex == latex
                 if hasCleanInlineBoundary, isPlausibleLatex(latex) {
                     result.append(.math(latex: latex, display: opening.delimiter.display))
@@ -73,6 +76,20 @@ public enum AIMessageContentParser {
             cursor = opening.range.upperBound
         }
         return result
+    }
+
+    private static func normalizedLatex(_ rawLatex: String, display: Bool) -> String {
+        let trimmed = rawLatex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard display, trimmed.contains(where: { $0.isNewline }) else {
+            return trimmed
+        }
+        return trimmed
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     public static func isPlausibleLatex(_ latex: String) -> Bool {
