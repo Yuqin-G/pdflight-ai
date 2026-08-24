@@ -305,6 +305,25 @@ enum PDFlightAppSelfChecks {
         }
         askSidebar.setMessageFontSizeForLayoutCheck(originalFontSize)
 
+        let pastedImage = AIChatImageAttachment(
+            id: "pasted-image",
+            fileName: "diagram.png",
+            mimeType: "image/png",
+            data: Data([0x89, 0x50, 0x4E, 0x47])
+        )
+        var sentImageIDs: [String] = []
+        askSidebar.onSend = { _, images, _ in
+            sentImageIDs = images.map(\.id)
+        }
+        askSidebar.addImageAttachmentForLayoutCheck(pastedImage)
+        guard askSidebar.composerImageAttachmentCountForLayoutCheck() == 1 else {
+            throw AppSelfCheckFailure(description: "Pasted chat images do not appear in the composer")
+        }
+        askSidebar.triggerSendForLayoutCheck()
+        guard sentImageIDs == [pastedImage.id] else {
+            throw AppSelfCheckFailure(description: "The composer did not send its image attachment")
+        }
+
         let settingsForm = AISettingsFormView(
             configuration: AIProviderConfiguration(
                 baseURL: "http://127.0.0.1:8199/v1",
@@ -348,6 +367,42 @@ enum PDFlightAppSelfChecks {
         guard askSidebar.messageContentContainsSelectableTextForLayoutCheck(id: markdown.id) else {
             throw AppSelfCheckFailure(
                 description: "Assistant reply text cannot be selected and copied"
+            )
+        }
+        guard askSidebar.messageContentAcceptsFocusForLayoutCheck(id: markdown.id) else {
+            throw AppSelfCheckFailure(
+                description: "Selectable assistant reply text cannot become the first responder for Command-C"
+            )
+        }
+        let copyWindow = NSWindow(
+            contentRect: splitView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        copyWindow.contentView = splitView
+        splitView.layoutSubtreeIfNeeded()
+        defer { copyWindow.close() }
+        let pasteboard = NSPasteboard.general
+        let savedPasteboardItems = (pasteboard.pasteboardItems ?? []).map { source in
+            let copy = NSPasteboardItem()
+            for type in source.types {
+                if let data = source.data(forType: type) {
+                    copy.setData(data, forType: type)
+                }
+            }
+            return copy
+        }
+        defer {
+            pasteboard.clearContents()
+            pasteboard.writeObjects(savedPasteboardItems)
+        }
+        pasteboard.clearContents()
+        pasteboard.setString("PDLIGHT_COPY_SENTINEL", forType: .string)
+        guard askSidebar.copyMessageSelectionForLayoutCheck(id: markdown.id),
+              pasteboard.string(forType: .string)?.contains("Method") == true else {
+            throw AppSelfCheckFailure(
+                description: "Command-C cannot copy the selected assistant reply through AppKit's field editor"
             )
         }
         guard askSidebar.messageHasBottomActionsForLayoutCheck(id: markdown.id) else {

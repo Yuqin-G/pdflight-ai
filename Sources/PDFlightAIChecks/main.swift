@@ -26,6 +26,8 @@ enum PDFlightAIChecks {
         print("PASS: neither prompt mode sends hidden PDF page context")
         try universalWebAPIRequestsCarryTheLocalConversationIdentity()
         print("PASS: Universal Web API requests bind one local conversation to one web conversation")
+        try imageAttachmentsStayPortableAndUseMultimodalRequestContent()
+        print("PASS: chat images stay portable and use OpenAI-compatible multimodal content")
         try onlyLocalQwenUsesBoundWebConversations()
         print("PASS: only local Universal Web API Qwen requests use web conversation binding")
         try messageContentSeparatesMarkdownAndLatex()
@@ -218,6 +220,56 @@ enum PDFlightAIChecks {
             (JSON["messages"] as? [[String: Any]])?.count == 1,
             "expected the visible request messages to remain intact"
         )
+    }
+
+    private static func imageAttachmentsStayPortableAndUseMultimodalRequestContent() throws {
+        let legacy = #"{"id":"legacy","role":"user","content":"old chat","createdAt":0}"#.data(using: .utf8)!
+        let decodedLegacy = try JSONDecoder().decode(AIChatMessage.self, from: legacy)
+        try check(decodedLegacy.imageAttachments.isEmpty, "expected legacy text-only history to remain readable")
+
+        let image = AIChatImageAttachment(
+            id: "image-a",
+            fileName: "diagram.png",
+            mimeType: "image/png",
+            data: Data([0x89, 0x50, 0x4E, 0x47])
+        )
+        let message = AIChatMessage(role: .user, content: "Explain this diagram", imageAttachments: [image])
+        let roundTrip = try JSONDecoder().decode(
+            AIChatMessage.self,
+            from: JSONEncoder().encode(message)
+        )
+        try check(roundTrip == message, "expected image data to survive portable JSON history")
+
+        let client = OpenAICompatibleClient()
+        let configuration = AIProviderConfiguration(baseURL: "https://example.com/v1", model: "vision-model")
+        let request = try client.makeRequest(
+            messages: [message],
+            configuration: configuration,
+            apiKey: "test"
+        )
+        let body = try checkNotNil(request.httpBody, "expected a multimodal request body")
+        let json = try checkNotNil(
+            JSONSerialization.jsonObject(with: body) as? [String: Any],
+            "expected a multimodal JSON object"
+        )
+        let messages = try checkNotNil(json["messages"] as? [[String: Any]], "expected request messages")
+        let content = try checkNotNil(messages.first?["content"] as? [[String: Any]], "expected array content for images")
+        try check(content.first?["type"] as? String == "text", "expected text before image content")
+        let imageURL = (content.last?["image_url"] as? [String: Any])?["url"] as? String
+        try check(
+            imageURL == "data:image/png;base64,iVBORw==",
+            "expected an inline data URL for the attached image"
+        )
+
+        let textRequest = try client.makeRequest(
+            messages: [AIChatMessage(role: .user, content: "text only")],
+            configuration: configuration,
+            apiKey: "test"
+        )
+        let textBody = try checkNotNil(textRequest.httpBody, "expected a text request body")
+        let textJSON = try checkNotNil(JSONSerialization.jsonObject(with: textBody) as? [String: Any], "expected text JSON")
+        let textMessages = try checkNotNil(textJSON["messages"] as? [[String: Any]], "expected text messages")
+        try check(textMessages.first?["content"] as? String == "text only", "expected text-only content to stay a string")
     }
 
     private static func onlyLocalQwenUsesBoundWebConversations() throws {

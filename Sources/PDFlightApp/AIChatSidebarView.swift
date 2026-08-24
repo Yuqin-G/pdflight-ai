@@ -1,5 +1,6 @@
 import AppKit
 import PDFlightAI
+import UniformTypeIdentifiers
 
 extension Notification.Name {
     static let aiReplyGestureZoomPreferenceDidChange = Notification.Name(
@@ -76,7 +77,7 @@ enum AIChatActivityPhase: Equatable {
 
 @MainActor
 final class AIChatSidebarView: NSView {
-    var onSend: ((String, AIPromptPreset) -> Void)?
+    var onSend: ((String, [AIChatImageAttachment], AIPromptPreset) -> Void)?
     var onConfigure: (() -> Void)?
     var onNewConversation: (() -> Void)?
     var onSelectConversation: ((String) -> Void)?
@@ -102,11 +103,14 @@ final class AIChatSidebarView: NSView {
     private let messageScrollView = AIChatMessageScrollView()
     private let messageStack = AIChatMessageStackView()
     private let composerContainer = NSView()
+    private let attachmentScrollView = NSScrollView()
+    private let attachmentStack = NSStackView()
     private let composerScrollView = NSScrollView()
-    private let composer = AIChatComposerTextView()
+    private let composer = AIChatComposerTextView(frame: .zero, textContainer: nil)
     private let promptModeScrollView = NSScrollView()
     private let promptModeStack = NSStackView()
     private let promptManageButton = NSButton()
+    private let attachImageButton = NSButton()
     private let sendButton = NSButton()
     private let cancelButton = NSButton()
     private let activityContainer = NSView()
@@ -129,6 +133,8 @@ final class AIChatSidebarView: NSView {
     }()
     private var replyGestureZoomEnabled = false
     private var isApplyingSelection = false
+    private var composerAttachments: [AIChatImageAttachment] = []
+    private var attachmentHeightConstraint: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -290,14 +296,19 @@ final class AIChatSidebarView: NSView {
         composer.isEditable = !streaming
         promptButtons.values.forEach { $0.isEnabled = !streaming }
         promptManageButton.isEnabled = !streaming
+        attachImageButton.isEnabled = !streaming
         conversationButtons.values.forEach { $0.isEnabled = !streaming }
         newConversationButton.isEnabled = !streaming
         deleteConversationButton.isEnabled = !streaming && !conversationIDs.isEmpty
     }
 
-    func prefill(_ text: String) {
+    func prefill(_ text: String, attachments: [AIChatImageAttachment] = []) {
         guard composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         composer.string = text
+        if composerAttachments.isEmpty, !attachments.isEmpty {
+            composerAttachments = Array(attachments.prefix(4))
+            rebuildComposerAttachments()
+        }
         composer.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         composer.needsDisplay = true
     }
@@ -362,6 +373,10 @@ final class AIChatSidebarView: NSView {
         messageViews[id]?.contentContainsSelectableTextForLayoutCheck() ?? false
     }
 
+    func copyMessageSelectionForLayoutCheck(id: String) -> Bool {
+        messageViews[id]?.copyContentForLayoutCheck() ?? false
+    }
+
     func renderedMathLatexForLayoutCheck(id: String) -> [String] {
         messageViews[id]?.renderedMathLatexForLayoutCheck() ?? []
     }
@@ -404,7 +419,21 @@ final class AIChatSidebarView: NSView {
 
     func clearComposer() {
         composer.string = ""
+        composerAttachments.removeAll()
+        rebuildComposerAttachments()
         composer.needsDisplay = true
+    }
+
+    func addImageAttachmentForLayoutCheck(_ attachment: AIChatImageAttachment) {
+        addImageAttachments([attachment])
+    }
+
+    func composerImageAttachmentCountForLayoutCheck() -> Int {
+        composerAttachments.count
+    }
+
+    func triggerSendForLayoutCheck() {
+        submitComposer()
     }
 
     func presentHistoryMenu(_ menu: NSMenu) {
@@ -507,6 +536,9 @@ final class AIChatSidebarView: NSView {
         composer.autoresizingMask = [.width]
         composer.textContainer?.widthTracksTextView = true
         composer.onSubmit = { [weak self] in self?.submitComposer() }
+        composer.onPasteboardImages = { [weak self] pasteboard in
+            self?.addImages(from: pasteboard) ?? false
+        }
         composerScrollView.documentView = composer
         composerScrollView.hasVerticalScroller = true
         composerScrollView.autohidesScrollers = true
@@ -514,6 +546,13 @@ final class AIChatSidebarView: NSView {
         composerScrollView.drawsBackground = false
         composerScrollView.translatesAutoresizingMaskIntoConstraints = false
         composer.frame = composerScrollView.contentView.bounds
+
+        configureHorizontalStrip(scrollView: attachmentScrollView, stack: attachmentStack)
+        attachmentScrollView.toolTip = "Images attached to this message"
+        attachmentScrollView.isHidden = true
+
+        configureComposerAction(attachImageButton, symbol: "photo.badge.plus", tooltip: "Attach images")
+        attachImageButton.action = #selector(attachImagePressed(_:))
 
         configureHorizontalStrip(scrollView: promptModeScrollView, stack: promptModeStack)
         promptModeScrollView.toolTip = "Prompt modes"
@@ -532,6 +571,7 @@ final class AIChatSidebarView: NSView {
         let composerActions = NSStackView(views: [
             promptModeScrollView,
             promptManageButton,
+            attachImageButton,
             cancelButton,
             sendButton
         ])
@@ -540,6 +580,7 @@ final class AIChatSidebarView: NSView {
         composerActions.spacing = 6
         composerActions.translatesAutoresizingMaskIntoConstraints = false
 
+        composerContainer.addSubview(attachmentScrollView)
         composerContainer.addSubview(composerScrollView)
         composerContainer.addSubview(composerActions)
 
@@ -587,6 +628,7 @@ final class AIChatSidebarView: NSView {
         addSubview(activityContainer)
         addSubview(resizeHandle, positioned: .above, relativeTo: nil)
 
+        attachmentHeightConstraint = attachmentScrollView.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             resizeHandle.leadingAnchor.constraint(equalTo: leadingAnchor),
             resizeHandle.topAnchor.constraint(equalTo: topAnchor),
@@ -612,7 +654,11 @@ final class AIChatSidebarView: NSView {
             messageStack.widthAnchor.constraint(equalTo: messageScrollView.contentView.widthAnchor),
             composerContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             composerContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            composerScrollView.topAnchor.constraint(equalTo: composerContainer.topAnchor, constant: 3),
+            attachmentScrollView.topAnchor.constraint(equalTo: composerContainer.topAnchor, constant: 5),
+            attachmentScrollView.leadingAnchor.constraint(equalTo: composerContainer.leadingAnchor, constant: 7),
+            attachmentScrollView.trailingAnchor.constraint(equalTo: composerContainer.trailingAnchor, constant: -7),
+            attachmentHeightConstraint,
+            composerScrollView.topAnchor.constraint(equalTo: attachmentScrollView.bottomAnchor, constant: 3),
             composerScrollView.leadingAnchor.constraint(equalTo: composerContainer.leadingAnchor, constant: 3),
             composerScrollView.trailingAnchor.constraint(equalTo: composerContainer.trailingAnchor, constant: -3),
             composerScrollView.heightAnchor.constraint(equalToConstant: 70),
@@ -699,10 +745,65 @@ final class AIChatSidebarView: NSView {
     private func submitComposer() {
         let text = composer.string.trimmingCharacters(in: .whitespacesAndNewlines)
         let preset = selectedPreset()
-        guard selectedPromptTemplate().displayQuestion(for: text) != nil,
+        guard (!composerAttachments.isEmpty || selectedPromptTemplate().displayQuestion(for: text) != nil),
               composer.isEditable else { return }
+        let attachments = composerAttachments
         clearComposer()
-        onSend?(text, preset)
+        onSend?(text, attachments, preset)
+    }
+
+    private func addImages(from pasteboard: NSPasteboard) -> Bool {
+        var images: [(NSImage, String)] = []
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        let URLs = (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
+        for URL in URLs where UTType(filenameExtension: URL.pathExtension)?.conforms(to: .image) == true {
+            if let image = NSImage(contentsOf: URL) {
+                images.append((image, URL.lastPathComponent))
+            }
+        }
+        if images.isEmpty, let image = NSImage(pasteboard: pasteboard) {
+            images.append((image, "Pasted image.png"))
+        }
+        guard !images.isEmpty else { return false }
+        let available = max(0, 4 - composerAttachments.count)
+        let attachments = images.prefix(available).compactMap { image, fileName in
+            AIChatImageEncoder.attachment(from: image, fileName: fileName)
+        }
+        guard !attachments.isEmpty else {
+            setStatus("Image could not be prepared or exceeds 4 MB")
+            return true
+        }
+        addImageAttachments(attachments)
+        return true
+    }
+
+    private func addImageAttachments(_ attachments: [AIChatImageAttachment]) {
+        let remaining = max(0, 4 - composerAttachments.count)
+        guard remaining > 0 else {
+            setStatus("Up to 4 images can be attached to one message")
+            return
+        }
+        composerAttachments.append(contentsOf: attachments.prefix(remaining))
+        rebuildComposerAttachments()
+    }
+
+    private func rebuildComposerAttachments() {
+        attachmentStack.arrangedSubviews.forEach {
+            attachmentStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        for attachment in composerAttachments {
+            let chip = AIChatImageChip(attachment: attachment, removable: true)
+            chip.onRemove = { [weak self] in
+                self?.composerAttachments.removeAll { $0.id == attachment.id }
+                self?.rebuildComposerAttachments()
+            }
+            attachmentStack.addArrangedSubview(chip)
+        }
+        let hasAttachments = !composerAttachments.isEmpty
+        attachmentScrollView.isHidden = !hasAttachments
+        attachmentHeightConstraint?.constant = hasAttachments ? 58 : 0
+        composerContainer.needsLayout = true
     }
 
     private func scrollConversationTabToVisible(_ id: String?) {
@@ -810,6 +911,21 @@ final class AIChatSidebarView: NSView {
     }
 
     @objc private func sendPressed(_ sender: Any?) { submitComposer() }
+    @objc private func attachImagePressed(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.title = "Attach images"
+        panel.prompt = "Attach"
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK else { return }
+        let attachments = panel.urls.prefix(max(0, 4 - composerAttachments.count)).compactMap { URL in
+            NSImage(contentsOf: URL).flatMap {
+                AIChatImageEncoder.attachment(from: $0, fileName: URL.lastPathComponent)
+            }
+        }
+        addImageAttachments(attachments)
+    }
     @objc private func cancelPressed(_ sender: Any?) { onCancel?() }
     @objc private func configurePressed(_ sender: Any?) { onConfigure?() }
     @objc private func newConversationPressed(_ sender: Any?) { onNewConversation?() }
@@ -1202,6 +1318,7 @@ private final class AIChatMessageView: NSView {
             actionRow.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8),
             actionRow.heightAnchor.constraint(equalToConstant: 22)
         ])
+        contentView.setImageAttachments(message.imageAttachments)
         setContent(message.content, renderMarkdown: message.role == .assistant)
     }
 
@@ -1233,6 +1350,10 @@ private final class AIChatMessageView: NSView {
 
     func contentContainsSelectableTextForLayoutCheck() -> Bool {
         contentView.containsSelectableTextForLayoutCheck()
+    }
+
+    func copyContentForLayoutCheck() -> Bool {
+        contentView.copyFirstTextFieldForLayoutCheck()
     }
 
     func renderedMathLatexForLayoutCheck() -> [String] {
@@ -1329,6 +1450,7 @@ private final class AIChatRenderedContentView: NSStackView {
     private var rawContent = ""
     private var rendersMarkdown = false
     private var bodyFontSize: CGFloat = 13.5
+    private var imageAttachments: [AIChatImageAttachment] = []
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1348,6 +1470,11 @@ private final class AIChatRenderedContentView: NSStackView {
         render()
     }
 
+    func setImageAttachments(_ attachments: [AIChatImageAttachment]) {
+        imageAttachments = attachments
+        render()
+    }
+
     func setFontSize(_ fontSize: CGFloat) {
         bodyFontSize = min(24, max(11, fontSize))
         render()
@@ -1363,6 +1490,17 @@ private final class AIChatRenderedContentView: NSStackView {
 
     func containsSelectableTextForLayoutCheck() -> Bool {
         textFields(in: self).contains { $0.isSelectable }
+    }
+
+    func copyFirstTextFieldForLayoutCheck() -> Bool {
+        guard let field = textFields(in: self).first,
+              let window,
+              window.makeFirstResponder(field) else { return false }
+        field.selectText(nil)
+        guard let editor = field.currentEditor() else { return false }
+        editor.selectAll(nil)
+        editor.copy(nil)
+        return true
     }
 
     func renderedMathLatexForLayoutCheck() -> [String] {
@@ -1443,6 +1581,17 @@ private final class AIChatRenderedContentView: NSStackView {
             removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
+        if !imageAttachments.isEmpty {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 7
+            for attachment in imageAttachments {
+                row.addArrangedSubview(AIChatImageChip(attachment: attachment, removable: false))
+            }
+            addArrangedSubview(row)
+        }
+        guard !rawContent.isEmpty else { return }
         guard rendersMarkdown else {
             addText(rawContent, markdown: false)
             return
@@ -1918,7 +2067,11 @@ private final class AIChatDisplayMathScrollView: NSScrollView {
 }
 
 @MainActor
-private final class AIChatSelectableTextField: NSTextField {}
+private final class AIChatSelectableTextField: NSTextField {
+    override var acceptsFirstResponder: Bool {
+        isSelectable || isEditable
+    }
+}
 
 @MainActor
 private final class AIChatTableGridView: NSGridView {
@@ -1938,8 +2091,19 @@ private final class AIChatTableGridView: NSGridView {
 @MainActor
 private final class AIChatComposerTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    var onPasteboardImages: ((NSPasteboard) -> Bool)?
     var placeholderString = "" {
         didSet { needsDisplay = true }
+    }
+
+    override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
+        super.init(frame: frameRect, textContainer: container)
+        registerForDraggedTypes([.fileURL, .png, .tiff])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 
     override func didChangeText() {
@@ -1968,5 +2132,126 @@ private final class AIChatComposerTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+
+    override func paste(_ sender: Any?) {
+        if onPasteboardImages?(NSPasteboard.general) == true { return }
+        super.paste(sender)
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard onPasteboardImages != nil,
+              sender.draggingPasteboard.availableType(from: [.fileURL, .png, .tiff]) != nil else {
+            return super.draggingEntered(sender)
+        }
+        return .copy
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        if onPasteboardImages?(sender.draggingPasteboard) == true { return true }
+        return super.performDragOperation(sender)
+    }
+}
+
+@MainActor
+private final class AIChatImageChip: NSView {
+    var onRemove: (() -> Void)?
+    private let removeButton = NSButton()
+
+    init(attachment: AIChatImageAttachment, removable: Bool) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let imageView = NSImageView()
+        imageView.image = NSImage(data: attachment.data)
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.wantsLayer = true
+        imageView.layer?.cornerRadius = 6
+        imageView.layer?.masksToBounds = true
+        imageView.toolTip = attachment.fileName
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+
+        removeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove image")
+        removeButton.isBordered = false
+        removeButton.contentTintColor = .secondaryLabelColor
+        removeButton.target = self
+        removeButton.action = #selector(removePressed(_:))
+        removeButton.isHidden = !removable
+        removeButton.toolTip = "Remove image"
+        removeButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(removeButton)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 54),
+            heightAnchor.constraint(equalToConstant: 54),
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            imageView.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            imageView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            removeButton.topAnchor.constraint(equalTo: topAnchor, constant: -3),
+            removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 3),
+            removeButton.widthAnchor.constraint(equalToConstant: 18),
+            removeButton.heightAnchor.constraint(equalToConstant: 18)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func removePressed(_ sender: Any?) {
+        onRemove?()
+    }
+}
+
+@MainActor
+private enum AIChatImageEncoder {
+    static func attachment(from image: NSImage, fileName: String) -> AIChatImageAttachment? {
+        let sourceSize = image.size
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return nil }
+        let scale = min(1, 1_600 / max(sourceSize.width, sourceSize.height))
+        let width = max(1, Int((sourceSize.width * scale).rounded()))
+        let height = max(1, Int((sourceSize.height * scale).rounded()))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        bitmap.size = NSSize(width: width, height: height)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        image.draw(
+            in: NSRect(x: 0, y: 0, width: width, height: height),
+            from: .zero,
+            operation: .copy,
+            fraction: 1
+        )
+        NSGraphicsContext.restoreGraphicsState()
+
+        if let PNG = bitmap.representation(using: .png, properties: [:]), PNG.count <= 4_000_000 {
+            return AIChatImageAttachment(fileName: normalizedName(fileName, extension: "png"), mimeType: "image/png", data: PNG)
+        }
+        guard let JPEG = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.82]),
+              JPEG.count <= 4_000_000 else { return nil }
+        return AIChatImageAttachment(fileName: normalizedName(fileName, extension: "jpg"), mimeType: "image/jpeg", data: JPEG)
+    }
+
+    private static func normalizedName(_ fileName: String, extension fileExtension: String) -> String {
+        let stem = (fileName as NSString).deletingPathExtension
+        return "\(stem.isEmpty ? "Image" : stem).\(fileExtension)"
     }
 }

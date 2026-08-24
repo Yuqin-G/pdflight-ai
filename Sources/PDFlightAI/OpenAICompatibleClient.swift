@@ -83,7 +83,7 @@ public struct OpenAICompatibleClient: Sendable {
         }
         request.httpBody = try JSONEncoder().encode(RequestBody(
             model: model,
-            messages: messages.map { RequestMessage(role: $0.role.rawValue, content: $0.content) },
+            messages: messages.map(RequestMessage.init),
             stream: true,
             conversationKey: conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines),
             conversationTitle: conversationTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -144,5 +144,60 @@ private struct RequestBody: Encodable {
 
 private struct RequestMessage: Encodable {
     let role: String
-    let content: String
+    let message: AIChatMessage
+
+    init(_ message: AIChatMessage) {
+        role = message.role.rawValue
+        self.message = message
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case role, content
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        guard !message.imageAttachments.isEmpty else {
+            try container.encode(message.content, forKey: .content)
+            return
+        }
+        var content = container.nestedUnkeyedContainer(forKey: .content)
+        if !message.content.isEmpty {
+            try content.encode(RequestContent.text(message.content))
+        }
+        for attachment in message.imageAttachments {
+            try content.encode(RequestContent.image(attachment))
+        }
+    }
+}
+
+private enum RequestContent: Encodable {
+    case text(String)
+    case image(AIChatImageAttachment)
+
+    enum CodingKeys: String, CodingKey {
+        case type, text, imageURL = "image_url"
+    }
+
+    enum ImageURLCodingKeys: String, CodingKey {
+        case url
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .text(text):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+        case let .image(attachment):
+            try container.encode("image_url", forKey: .type)
+            var imageURL = container.nestedContainer(
+                keyedBy: ImageURLCodingKeys.self,
+                forKey: .imageURL
+            )
+            let url = "data:\(attachment.mimeType);base64,\(attachment.data.base64EncodedString())"
+            try imageURL.encode(url, forKey: .url)
+        }
+    }
 }

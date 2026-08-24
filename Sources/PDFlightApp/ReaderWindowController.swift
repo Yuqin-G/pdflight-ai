@@ -288,7 +288,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private var activeAIPlaceholderID: String?
     private var aiHistorySaveTask: Task<Void, Never>?
     private var aiHistoryLoaded = false
-    private var pendingAISubmission: (question: String, preset: AIPromptPreset)?
+    private var pendingAISubmission: (
+        question: String,
+        attachments: [AIChatImageAttachment],
+        preset: AIPromptPreset
+    )?
     private var pendingAIConversationID: String?
     private var aiPromptTemplates = AIPromptTemplate.defaults
     private var aiConversationGeneration = 0
@@ -931,8 +935,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         navigationSidebar.translatesAutoresizingMaskIntoConstraints = false
         navigationSidebar.isHidden = false
         outlineButton.state = .on
-        aiSidebar.onSend = { [weak self] question, preset in
-            self?.sendAIMessage(question, preset: preset)
+        aiSidebar.onSend = { [weak self] question, attachments, preset in
+            self?.sendAIMessage(question, attachments: attachments, preset: preset)
         }
         aiSidebar.onConfigure = { [weak self] in
             self?.configureAI(nil)
@@ -1440,24 +1444,32 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             activateAIConversation(conversationID, persistSelection: false)
             if let submission = pendingAISubmission {
                 pendingAISubmission = nil
-                sendAIMessage(submission.question, preset: submission.preset)
+                sendAIMessage(
+                    submission.question,
+                    attachments: submission.attachments,
+                    preset: submission.preset
+                )
             }
         }
     }
 
-    private func sendAIMessage(_ question: String, preset: AIPromptPreset) {
+    private func sendAIMessage(
+        _ question: String,
+        attachments: [AIChatImageAttachment] = [],
+        preset: AIPromptPreset
+    ) {
         guard aiTask == nil else { return }
         guard aiHistoryLoaded else {
-            pendingAISubmission = (question, preset)
+            pendingAISubmission = (question, attachments, preset)
             aiSidebar.setActivity(.loading, detail: "Opening this PDF's local conversation")
             return
         }
 
         let configuration = aiConfigurationStore.configuration()
         guard !configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            aiSidebar.prefill(question)
+            aiSidebar.prefill(question, attachments: attachments)
             if showAISettings() {
-                sendAIMessage(question, preset: preset)
+                sendAIMessage(question, attachments: attachments, preset: preset)
             } else {
                 aiSidebar.setActivity(.failed, detail: "Choose an AI provider and model before sending")
             }
@@ -1468,13 +1480,17 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         do {
             apiKey = try aiConfigurationStore.apiKey()
         } catch {
-            aiSidebar.prefill(question)
+            aiSidebar.prefill(question, attachments: attachments)
             present(error: error, title: "Could not read AI settings")
             return
         }
 
         let promptTemplate = promptTemplate(for: preset)
-        guard let displayQuestion = promptTemplate.displayQuestion(for: question) else { return }
+        let normalizedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !attachments.isEmpty
+            ? "Please analyze the attached image."
+            : question
+        guard let displayQuestion = promptTemplate.displayQuestion(for: normalizedQuestion) else { return }
         if let index = activeAIConversationIndex {
             aiHistory?.conversations[index].promptPreset = preset
             if aiMessages.isEmpty,
@@ -1484,7 +1500,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             aiHistory?.conversations[index].updatedAt = Date()
             refreshAIConversationControls()
         }
-        let userMessage = AIChatMessage(role: .user, content: displayQuestion)
+        let userMessage = AIChatMessage(
+            role: .user,
+            content: displayQuestion,
+            imageAttachments: attachments
+        )
         aiSidebar.clearComposer()
         aiMessages.append(userMessage)
         aiSidebar.append(userMessage)
