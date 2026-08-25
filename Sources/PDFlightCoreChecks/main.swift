@@ -16,8 +16,12 @@ enum PDFlightCoreChecks {
         print("PASS: reading position survives a store reload")
         try readingPositionStorePrunesOldDocuments()
         print("PASS: reading position store prunes old documents")
+        try readerSessionStoreRestoresOnlyTheLastOpenPDFs()
+        print("PASS: reader session store restores only the last open PDFs")
         try await paperLibraryPersistsNestedCollectionsAndAssignments()
         print("PASS: paper library persists nested collections and paper assignments")
+        try await paperLibraryTracksTrueRecentFilesAndMovesSelectionsAtomically()
+        print("PASS: paper library tracks true recent files and moves multi-selections atomically")
         try legacyPaperLibraryPapersGainAutomaticAliases()
         print("PASS: legacy paper-library JSON gains automatic display aliases")
         try await equivalentRequestsReuseCache()
@@ -83,6 +87,26 @@ enum PDFlightCoreChecks {
         }
     }
 
+    private static func readerSessionStoreRestoresOnlyTheLastOpenPDFs() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdflight-session-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("last-session.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let first = URL(fileURLWithPath: "/Users/reader/Papers/first.pdf")
+        let second = URL(fileURLWithPath: "/Users/reader/Papers/second.PDF")
+        let store = ReaderSessionStore(fileURL: fileURL)
+        try store.save(documentURLs: [first, first, URL(fileURLWithPath: "/tmp/note.txt"), second])
+        let restored = try store.documentURLs()
+        try check(
+            restored == [first.standardizedFileURL, second.standardizedFileURL],
+            "expected a portable, deduplicated PDF window session"
+        )
+        try store.clear()
+        let cleared = try store.documentURLs()
+        try check(cleared.isEmpty, "expected the saved window session to be clearable")
+    }
+
     private static func legacyPaperLibraryPapersGainAutomaticAliases() throws {
         let data = Data("""
         {
@@ -102,6 +126,43 @@ enum PDFlightCoreChecks {
             paper.displayTitle == "Yesterday's Shield, Today's Spear",
             "expected a legacy paper to receive its derived display alias"
         )
+    }
+
+    private static func paperLibraryTracksTrueRecentFilesAndMovesSelectionsAtomically() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdflight-paper-history-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("paper-library.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = PaperLibraryStore(fileURL: fileURL)
+        let source = try await store.createCollection(name: "Inbox", parentID: nil)
+        let destination = try await store.createCollection(name: "Methods", parentID: nil)
+        let firstURL = URL(fileURLWithPath: "/Users/reader/Papers/first.pdf")
+        let secondURL = URL(fileURLWithPath: "/Users/reader/Papers/second.pdf")
+        let first = try await store.addPaper(at: firstURL, to: source.id)
+        let second = try await store.addPaper(at: secondURL, to: source.id)
+        let recentAfterAdding = try await store.recentPapers()
+        try check(
+            recentAfterAdding.isEmpty,
+            "adding a PDF to Library should not claim it was opened"
+        )
+
+        _ = try await store.recordOpenedPaper(at: firstURL)
+        try await Task.sleep(for: .milliseconds(2))
+        _ = try await store.recordOpenedPaper(at: secondURL)
+        let recent = try await store.recentPapers()
+        try check(recent.map(\.id) == [second.id, first.id], "expected newest opened PDF first")
+
+        try await store.movePapers([first.id, second.id], to: destination.id)
+        let moved = try await store.snapshot().papers.filter { [first.id, second.id].contains($0.id) }
+        try check(
+            moved.allSatisfy { $0.collectionID == destination.id },
+            "expected a selected group to move in one store update"
+        )
+
+        try await store.clearRecentHistory()
+        let recentAfterClearing = try await store.recentPapers()
+        try check(recentAfterClearing.isEmpty, "expected recent-file history to be clearable")
     }
 
     private static func navigationBookmarkRestoresCenteredViewport() throws {

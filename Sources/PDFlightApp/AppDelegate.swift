@@ -24,14 +24,30 @@ enum ReaderCopyRouting {
     }
 }
 
+enum ReaderSessionRestorePreference {
+    static let defaultsKey = "reader.restoreLastSession"
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: defaultsKey) as? Bool ?? false
+    }
+
+    static func setEnabled(_ enabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: defaultsKey)
+    }
+}
+
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var readers: [ReaderWindowController] = []
     private let readingPositionStore = ReadingPositionStore(fileURL: AppDelegate.readingStateURL)
     private let paperLibraryStore = PaperLibraryStore(fileURL: AppDelegate.paperLibraryURL)
+    private let readerSessionStore = ReaderSessionStore(fileURL: AppDelegate.readerSessionURL)
     private let aiChatHistoryStore = AIChatHistoryStore(directoryURL: AppDelegate.aiHistoryDirectoryURL)
     private let aiPromptTemplateStore = AIPromptTemplateStore(fileURL: AppDelegate.aiPromptTemplatesURL)
     private let aiConfigurationStore = AppDelegate.makeAIConfigurationStore()
+    private var recentPapers: [PaperLibraryPaper] = []
+    private weak var openRecentMenu: NSMenu?
+    private var isTerminating = false
 
     private static var readingStateURL: URL {
         if let overridePath = ProcessInfo.processInfo.environment["PDFLIGHT_READING_STATE_FILE"],
@@ -93,6 +109,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .appendingPathComponent("paper-library.json")
     }
 
+    private static var readerSessionURL: URL {
+        if let overridePath = ProcessInfo.processInfo.environment["PDFLIGHT_READER_SESSION_FILE"],
+           !overridePath.isEmpty {
+            return URL(fileURLWithPath: overridePath)
+        }
+        return paperLibraryURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("last-session.json")
+    }
+
     private static func makeAIConfigurationStore() -> AIConfigurationStore {
         let environment = ProcessInfo.processInfo.environment
         let defaults: UserDefaults
@@ -115,13 +141,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         IOSMathResourceLocator.install()
         installMainMenu()
+        refreshRecentDocuments()
 
         let arguments = CommandLine.arguments.dropFirst().map(URL.init(fileURLWithPath:))
         let PDFs = arguments.filter { $0.pathExtension.lowercased() == "pdf" }
         if PDFs.isEmpty {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.readers.isEmpty else { return }
-                self.openDocument(nil)
+            let restored = restoreLastSessionIfEnabled()
+            if !restored {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.readers.isEmpty else { return }
+                    self.openDocument(nil)
+                }
             }
         } else {
             PDFs.forEach(open)
@@ -135,6 +165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         readers.forEach { $0.saveReadingPosition() }
+        if !isTerminating { saveCurrentSession() }
+        isTerminating = true
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
@@ -149,6 +181,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK else { return }
         panel.urls.forEach(open)
+    }
+
+    @objc private func openRecentDocument(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        open(URL(fileURLWithPath: path))
+    }
+
+    @objc private func clearRecentDocuments(_ sender: Any?) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await paperLibraryStore.clearRecentHistory()
+                recentPapers = []
+                NotificationCenter.default.post(name: .paperLibraryDidChange, object: nil)
+            } catch {
+                present(error: error, title: "Could not clear recent files")
+            }
+        }
+    }
+
+    @objc private func toggleRestoreLastSession(_ sender: NSMenuItem) {
+        let enabled = !ReaderSessionRestorePreference.isEnabled()
+        ReaderSessionRestorePreference.setEnabled(enabled)
+        sender.state = enabled ? .on : .off
+    }
+
+    @objc private func quitApplication(_ sender: Any?) {
+        saveCurrentSession()
+        isTerminating = true
+        NSApplication.shared.terminate(sender)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            // If an unsaved-annotation prompt cancelled termination, normal session updates resume.
+            self?.isTerminating = false
+        }
     }
 
     @objc func saveDocument(_ sender: Any?) {
@@ -245,6 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func open(_ url: URL, selectingAIConversation conversationID: String?) {
         let normalizedURL = url.standardizedFileURL
         if let existing = readers.first(where: { $0.documentURL.standardizedFileURL == normalizedURL }) {
+            recordOpenedDocument(normalizedURL)
             if let conversationID { existing.selectAIConversation(conversationID) }
             existing.window?.makeKeyAndOrderFront(nil)
             return
@@ -264,6 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             reader.onClose = { [weak self, weak reader] in
                 guard let self, let reader else { return }
                 self.readers.removeAll { $0 === reader }
+                if !self.isTerminating { self.saveCurrentSession() }
             }
             reader.onNavigateAIHistory = { [weak self] URL, conversationID in
                 self?.open(URL, selectingAIConversation: conversationID)
@@ -271,17 +339,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             reader.onOpenPaperFromLibrary = { [weak self] url in
                 self?.open(url)
             }
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    _ = try await paperLibraryStore.addPaper(at: normalizedURL, to: nil)
-                    NotificationCenter.default.post(name: .paperLibraryDidChange, object: nil)
-                } catch {
-                    // Opening the PDF remains successful even if the optional library index cannot be saved.
-                }
-            }
+            recordOpenedDocument(normalizedURL)
             if let conversationID { reader.selectAIConversation(conversationID) }
             readers.append(reader)
+            saveCurrentSession()
             if let tabHost, let newWindow = reader.window {
                 tabHost.addTabbedWindow(newWindow, ordered: .above)
                 newWindow.makeKeyAndOrderFront(nil)
@@ -291,6 +352,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             present(error: error, title: "Could not open PDF")
         }
+    }
+
+    private func recordOpenedDocument(_ url: URL) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await paperLibraryStore.recordOpenedPaper(at: url)
+                recentPapers = try await paperLibraryStore.recentPapers(limit: 20)
+                NotificationCenter.default.post(name: .paperLibraryDidChange, object: nil)
+            } catch {
+                // Opening the PDF remains successful even if optional history cannot be saved.
+            }
+        }
+    }
+
+    private func refreshRecentDocuments() {
+        Task { [weak self] in
+            guard let self else { return }
+            recentPapers = (try? await paperLibraryStore.recentPapers(limit: 20)) ?? []
+        }
+    }
+
+    private func saveCurrentSession() {
+        try? readerSessionStore.save(documentURLs: readers.map(\.documentURL))
+    }
+
+    private func restoreLastSessionIfEnabled() -> Bool {
+        guard ReaderSessionRestorePreference.isEnabled() else { return false }
+        let URLs = ((try? readerSessionStore.documentURLs()) ?? []).filter {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
+        guard !URLs.isEmpty else { return false }
+        URLs.forEach(open)
+        return true
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === openRecentMenu else { return }
+        menu.removeAllItems()
+        if recentPapers.isEmpty {
+            let empty = NSMenuItem(title: "No Recent PDFs", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            for paper in recentPapers {
+                let item = NSMenuItem(
+                    title: paper.displayTitle,
+                    action: #selector(openRecentDocument(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = paper.path
+                item.toolTip = paper.path
+                item.isEnabled = FileManager.default.fileExists(atPath: paper.path)
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+            let clear = NSMenuItem(
+                title: "Clear Menu",
+                action: #selector(clearRecentDocuments(_:)),
+                keyEquivalent: ""
+            )
+            clear.target = self
+            menu.addItem(clear)
+        }
+        refreshRecentDocuments()
     }
 
     private func openEngine(for url: URL) throws -> MuPDFDocument? {
@@ -348,8 +475,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ","
         )
         aiSettings.target = self
+        let restoreSession = applicationMenu.addItem(
+            withTitle: "Restore Last Session at Launch",
+            action: #selector(toggleRestoreLastSession(_:)),
+            keyEquivalent: ""
+        )
+        restoreSession.target = self
+        restoreSession.state = ReaderSessionRestorePreference.isEnabled() ? .on : .off
         applicationMenu.addItem(.separator())
-        applicationMenu.addItem(withTitle: "Quit PDFlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = applicationMenu.addItem(
+            withTitle: "Quit PDFlight",
+            action: #selector(quitApplication(_:)),
+            keyEquivalent: "q"
+        )
+        quit.target = self
 
         let fileItem = NSMenuItem()
         mainMenu.addItem(fileItem)
@@ -357,6 +496,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileItem.submenu = fileMenu
         let open = fileMenu.addItem(withTitle: "Open…", action: #selector(openDocument(_:)), keyEquivalent: "o")
         open.target = self
+        let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
+        let recentMenu = NSMenu(title: "Open Recent")
+        recentMenu.delegate = self
+        recentItem.submenu = recentMenu
+        fileMenu.addItem(recentItem)
+        openRecentMenu = recentMenu
         let save = fileMenu.addItem(withTitle: "Save", action: #selector(saveDocument(_:)), keyEquivalent: "s")
         save.target = self
         fileMenu.addItem(.separator())

@@ -21,7 +21,7 @@ public struct PaperLibraryPaper: Codable, Equatable, Identifiable, Sendable {
     public var collectionID: String?
     public var displayAlias: String?
     public let addedAt: Date
-    public var lastOpenedAt: Date
+    public var lastOpenedAt: Date?
 
     public init(
         id: String = UUID().uuidString,
@@ -30,7 +30,7 @@ public struct PaperLibraryPaper: Codable, Equatable, Identifiable, Sendable {
         collectionID: String?,
         displayAlias: String? = nil,
         addedAt: Date = Date(),
-        lastOpenedAt: Date = Date()
+        lastOpenedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -178,7 +178,6 @@ public actor PaperLibraryStore {
         let path = normalizedURL.path
         if let index = state.papers.firstIndex(where: { URL(fileURLWithPath: $0.path).standardizedFileURL.path == path }) {
             state.papers[index].title = normalizedURL.deletingPathExtension().lastPathComponent
-            state.papers[index].lastOpenedAt = Date()
             if let collectionID { state.papers[index].collectionID = collectionID }
             let paper = state.papers[index]
             try save(state)
@@ -194,15 +193,66 @@ public actor PaperLibraryStore {
         return paper
     }
 
+    @discardableResult
+    public func recordOpenedPaper(at url: URL, openedAt: Date = Date()) throws -> PaperLibraryPaper {
+        var state = try loadIfNeeded()
+        let normalizedURL = url.standardizedFileURL
+        let path = normalizedURL.path
+        if let index = state.papers.firstIndex(where: {
+            URL(fileURLWithPath: $0.path).standardizedFileURL.path == path
+        }) {
+            state.papers[index].title = normalizedURL.deletingPathExtension().lastPathComponent
+            state.papers[index].lastOpenedAt = openedAt
+            let paper = state.papers[index]
+            try save(state)
+            return paper
+        }
+        let paper = PaperLibraryPaper(
+            title: normalizedURL.deletingPathExtension().lastPathComponent,
+            path: path,
+            collectionID: nil,
+            lastOpenedAt: openedAt
+        )
+        state.papers.append(paper)
+        try save(state)
+        return paper
+    }
+
+    public func recentPapers(limit: Int = 50) throws -> [PaperLibraryPaper] {
+        let state = try loadIfNeeded()
+        return Array(state.papers
+            .filter { $0.lastOpenedAt != nil }
+            .sorted { lhs, rhs in
+                (lhs.lastOpenedAt ?? .distantPast) > (rhs.lastOpenedAt ?? .distantPast)
+            }
+            .prefix(max(0, limit)))
+    }
+
+    public func clearRecentHistory() throws {
+        var state = try loadIfNeeded()
+        for index in state.papers.indices {
+            state.papers[index].lastOpenedAt = nil
+        }
+        try save(state)
+    }
+
     public func movePaper(_ id: String, to collectionID: String?) throws {
+        try movePapers([id], to: collectionID)
+    }
+
+    public func movePapers(_ ids: [String], to collectionID: String?) throws {
         var state = try loadIfNeeded()
         if let collectionID, !state.collections.contains(where: { $0.id == collectionID }) {
             throw PaperLibraryError.collectionNotFound
         }
-        guard let index = state.papers.firstIndex(where: { $0.id == id }) else {
+        let uniqueIDs = Set(ids)
+        guard !uniqueIDs.isEmpty,
+              uniqueIDs.allSatisfy({ id in state.papers.contains(where: { $0.id == id }) }) else {
             throw PaperLibraryError.paperNotFound
         }
-        state.papers[index].collectionID = collectionID
+        for index in state.papers.indices where uniqueIDs.contains(state.papers[index].id) {
+            state.papers[index].collectionID = collectionID
+        }
         try save(state)
     }
 

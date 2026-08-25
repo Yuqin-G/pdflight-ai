@@ -62,6 +62,10 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         outlineView.registeredDraggedTypes.contains(Self.paperPasteboardType)
     }
 
+    func multiplePaperSelectionEnabledForLayoutCheck() -> Bool {
+        outlineView.allowsMultipleSelection
+    }
+
     private func configure() {
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -98,6 +102,7 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         outlineView.rowHeight = 27
         outlineView.indentationPerLevel = 14
         outlineView.style = .sourceList
+        outlineView.allowsMultipleSelection = true
         outlineView.dataSource = self
         outlineView.delegate = self
         outlineView.target = self
@@ -156,7 +161,18 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
             }
         }
         let matchingCollectionIDs = ancestorCollectionIDs(for: matchingPapers)
-        roots = buildCollections(parentID: nil, papers: matchingPapers, visibleCollectionIDs: matchingCollectionIDs)
+        roots = []
+        if query.isEmpty {
+            let recent = matchingPapers
+                .filter { $0.lastOpenedAt != nil }
+                .sorted { ($0.lastOpenedAt ?? .distantPast) > ($1.lastOpenedAt ?? .distantPast) }
+            if !recent.isEmpty {
+                roots.append(LibraryTreeItem.virtualRecent(
+                    children: recent.prefix(20).map(LibraryTreeItem.paper)
+                ))
+            }
+        }
+        roots += buildCollections(parentID: nil, papers: matchingPapers, visibleCollectionIDs: matchingCollectionIDs)
         let unfiled = matchingPapers.filter { $0.collectionID == nil }.sorted(by: paperSort)
         if !unfiled.isEmpty {
             roots.append(LibraryTreeItem.virtualUnfiled(children: unfiled.map(LibraryTreeItem.paper)))
@@ -239,7 +255,9 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         cell.textField?.stringValue = item.title
         cell.textField?.toolTip = item.paper?.path ?? item.title
         cell.imageView?.image = NSImage(
-            systemSymbolName: item.paper == nil ? (item.isVirtual ? "tray" : "folder") : "doc.text",
+            systemSymbolName: item.paper == nil
+                ? (item.virtualKind == .recent ? "clock" : item.isVirtual ? "tray" : "folder")
+                : "doc.text",
             accessibilityDescription: nil
         )
         cell.imageView?.contentTintColor = item.paper == nil ? .systemBlue : .secondaryLabelColor
@@ -276,12 +294,15 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         proposedItem item: Any?,
         proposedChildIndex index: Int
     ) -> NSDragOperation {
+        let paperIDs = draggedPaperIDs(from: info.draggingPasteboard)
         guard info.draggingSource as? NSOutlineView === outlineView,
-              let paperID = info.draggingPasteboard.string(forType: Self.paperPasteboardType),
+              !paperIDs.isEmpty,
               let target = item as? LibraryTreeItem,
-              target.collection != nil || target.isVirtual else { return [] }
+              target.collection != nil || target.virtualKind == .unfiled else { return [] }
         let destinationID = target.collection?.id
-        guard snapshot.papers.first(where: { $0.id == paperID })?.collectionID != destinationID else {
+        guard paperIDs.contains(where: { paperID in
+            snapshot.papers.first(where: { $0.id == paperID })?.collectionID != destinationID
+        }) else {
             return []
         }
         outlineView.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex)
@@ -294,17 +315,27 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         item: Any?,
         childIndex index: Int
     ) -> Bool {
-        guard let paperID = info.draggingPasteboard.string(forType: Self.paperPasteboardType),
+        let paperIDs = draggedPaperIDs(from: info.draggingPasteboard)
+        guard !paperIDs.isEmpty,
               let target = item as? LibraryTreeItem,
-              target.collection != nil || target.isVirtual else { return false }
+              target.collection != nil || target.virtualKind == .unfiled else { return false }
         let destinationID = target.collection?.id
         if let destinationID {
             expandedCollectionIDs.insert(destinationID)
         }
         mutate { store in
-            try await store.movePaper(paperID, to: destinationID)
+            try await store.movePapers(paperIDs, to: destinationID)
         }
         return true
+    }
+
+    private func draggedPaperIDs(from pasteboard: NSPasteboard) -> [String] {
+        var seen: Set<String> = []
+        return (pasteboard.pasteboardItems ?? []).compactMap { item in
+            guard let id = item.string(forType: Self.paperPasteboardType),
+                  seen.insert(id).inserted else { return nil }
+            return id
+        }
     }
 
     private func makeCell() -> NSTableCellView {
@@ -336,13 +367,13 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     }
 
     @objc private func openSelectedPaper(_ sender: Any?) {
-        let row = outlineView.selectedRow
-        guard row >= 0, let paper = (outlineView.item(atRow: row) as? LibraryTreeItem)?.paper else { return }
-        guard FileManager.default.fileExists(atPath: paper.path) else {
-            present(PaperLibraryUIError.missingFile(paper.path))
-            return
+        for paper in selectedPapers() {
+            guard FileManager.default.fileExists(atPath: paper.path) else {
+                present(PaperLibraryUIError.missingFile(paper.path))
+                continue
+            }
+            onOpenPaper?(paper.fileURL)
         }
-        onOpenPaper?(paper.fileURL)
     }
 
     @objc private func searchChanged(_ sender: Any?) { rebuildTree() }
@@ -380,25 +411,43 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         menu.removeAllItems()
         let clickedRow = outlineView.clickedRow
         guard clickedRow >= 0, let item = outlineView.item(atRow: clickedRow) as? LibraryTreeItem else { return }
-        outlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
+        if !outlineView.selectedRowIndexes.contains(clickedRow) {
+            outlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
+        }
         if let collection = item.collection {
             addMenuItem(menu, title: "New subcollection", action: #selector(addCollection(_:)), id: collection.id)
             addMenuItem(menu, title: "Rename…", action: #selector(renameCollection(_:)), id: collection.id)
             menu.addItem(.separator())
             addMenuItem(menu, title: "Delete collection", action: #selector(deleteCollection(_:)), id: collection.id)
         } else if let paper = item.paper {
-            addMenuItem(menu, title: "Open", action: #selector(openSelectedPaper(_:)), id: paper.id)
+            let selectedIDs = selectedPapers().map(\.id)
+            let paperIDs = selectedIDs.contains(paper.id) ? selectedIDs : [paper.id]
             addMenuItem(
                 menu,
-                title: "Edit display name…",
-                action: #selector(editPaperDisplayName(_:)),
+                title: paperIDs.count == 1 ? "Open" : "Open \(paperIDs.count) Papers",
+                action: #selector(openSelectedPaper(_:)),
                 id: paper.id
             )
+            if paperIDs.count == 1 {
+                addMenuItem(
+                    menu,
+                    title: "Edit display name…",
+                    action: #selector(editPaperDisplayName(_:)),
+                    id: paper.id
+                )
+            }
             let move = NSMenuItem(title: "Move to", action: nil, keyEquivalent: "")
-            move.submenu = moveMenu(for: paper.id)
+            move.submenu = moveMenu(for: paperIDs)
             menu.addItem(move)
             menu.addItem(.separator())
-            addMenuItem(menu, title: "Remove from library", action: #selector(removePaper(_:)), id: paper.id)
+            let remove = NSMenuItem(
+                title: paperIDs.count == 1 ? "Remove from library" : "Remove \(paperIDs.count) from library",
+                action: #selector(removePapers(_:)),
+                keyEquivalent: ""
+            )
+            remove.target = self
+            remove.representedObject = LibraryPaperSelection(ids: paperIDs)
+            menu.addItem(remove)
         }
     }
 
@@ -409,18 +458,30 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         menu.addItem(item)
     }
 
-    private func moveMenu(for paperID: String) -> NSMenu {
+    private func moveMenu(for paperIDs: [String]) -> NSMenu {
         let menu = NSMenu()
-        addMenuItem(menu, title: "Unfiled", action: #selector(movePaper(_:)), id: "\(paperID)|")
+        addMoveMenuItem(menu, title: "Unfiled", paperIDs: paperIDs, destinationID: nil)
         for collection in snapshot.collections.sorted(by: { collectionPath($0).localizedCaseInsensitiveCompare(collectionPath($1)) == .orderedAscending }) {
-            addMenuItem(
+            addMoveMenuItem(
                 menu,
                 title: collectionPath(collection),
-                action: #selector(movePaper(_:)),
-                id: "\(paperID)|\(collection.id)"
+                paperIDs: paperIDs,
+                destinationID: collection.id
             )
         }
         return menu
+    }
+
+    private func addMoveMenuItem(
+        _ menu: NSMenu,
+        title: String,
+        paperIDs: [String],
+        destinationID: String?
+    ) {
+        let item = NSMenuItem(title: title, action: #selector(movePapers(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = LibraryPaperMove(ids: paperIDs, destinationID: destinationID)
+        menu.addItem(item)
     }
 
     private func collectionPath(_ collection: PaperLibraryCollection) -> String {
@@ -459,11 +520,11 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         mutate { store in try await store.deleteCollection(id) }
     }
 
-    @objc private func movePaper(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? String else { return }
-        let parts = value.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 2 else { return }
-        mutate { store in try await store.movePaper(parts[0], to: parts[1].isEmpty ? nil : parts[1]) }
+    @objc private func movePapers(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? LibraryPaperMove else { return }
+        mutate { store in
+            try await store.movePapers(selection.ids, to: selection.destinationID)
+        }
     }
 
     @objc private func editPaperDisplayName(_ sender: NSMenuItem) {
@@ -486,14 +547,22 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         }
     }
 
-    @objc private func removePaper(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        mutate { store in try await store.removePaper(id) }
+    @objc private func removePapers(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? LibraryPaperSelection else { return }
+        mutate { store in
+            for id in selection.ids { try await store.removePaper(id) }
+        }
     }
 
     private func selectedItem() -> LibraryTreeItem? {
         guard outlineView.selectedRow >= 0 else { return nil }
         return outlineView.item(atRow: outlineView.selectedRow) as? LibraryTreeItem
+    }
+
+    private func selectedPapers() -> [PaperLibraryPaper] {
+        outlineView.selectedRowIndexes.compactMap { row in
+            (outlineView.item(atRow: row) as? LibraryTreeItem)?.paper
+        }
     }
 
     private func mutate(_ operation: @escaping (PaperLibraryStore) async throws -> Void) {
@@ -514,29 +583,52 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     }
 }
 
+private final class LibraryPaperSelection: NSObject {
+    let ids: [String]
+
+    init(ids: [String]) {
+        self.ids = ids
+    }
+}
+
+private final class LibraryPaperMove: NSObject {
+    let ids: [String]
+    let destinationID: String?
+
+    init(ids: [String], destinationID: String?) {
+        self.ids = ids
+        self.destinationID = destinationID
+    }
+}
+
 private final class LibraryTreeItem {
+    enum VirtualKind {
+        case recent
+        case unfiled
+    }
+
     let collection: PaperLibraryCollection?
     let paper: PaperLibraryPaper?
     let title: String
-    let isVirtual: Bool
+    let virtualKind: VirtualKind?
     let children: [LibraryTreeItem]
 
     private init(
         collection: PaperLibraryCollection?,
         paper: PaperLibraryPaper?,
         title: String,
-        isVirtual: Bool,
+        virtualKind: VirtualKind?,
         children: [LibraryTreeItem]
     ) {
         self.collection = collection
         self.paper = paper
         self.title = title
-        self.isVirtual = isVirtual
+        self.virtualKind = virtualKind
         self.children = children
     }
 
     static func collection(_ collection: PaperLibraryCollection, children: [LibraryTreeItem]) -> LibraryTreeItem {
-        LibraryTreeItem(collection: collection, paper: nil, title: collection.name, isVirtual: false, children: children)
+        LibraryTreeItem(collection: collection, paper: nil, title: collection.name, virtualKind: nil, children: children)
     }
 
     static func paper(_ paper: PaperLibraryPaper) -> LibraryTreeItem {
@@ -544,15 +636,20 @@ private final class LibraryTreeItem {
             collection: nil,
             paper: paper,
             title: paper.displayTitle,
-            isVirtual: false,
+            virtualKind: nil,
             children: []
         )
     }
 
     static func virtualUnfiled(children: [LibraryTreeItem]) -> LibraryTreeItem {
-        LibraryTreeItem(collection: nil, paper: nil, title: "Unfiled", isVirtual: true, children: children)
+        LibraryTreeItem(collection: nil, paper: nil, title: "Unfiled", virtualKind: .unfiled, children: children)
     }
 
+    static func virtualRecent(children: [LibraryTreeItem]) -> LibraryTreeItem {
+        LibraryTreeItem(collection: nil, paper: nil, title: "Recent", virtualKind: .recent, children: children)
+    }
+
+    var isVirtual: Bool { virtualKind != nil }
     var isExpandable: Bool { !children.isEmpty }
 }
 

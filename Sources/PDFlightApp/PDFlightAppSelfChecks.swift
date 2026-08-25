@@ -147,6 +147,17 @@ enum PDFlightAppSelfChecks {
                 description: "Reply gesture zoom is not disabled by default"
             )
         }
+        guard !ReaderSessionRestorePreference.isEnabled(defaults: widthDefaults) else {
+            throw AppSelfCheckFailure(
+                description: "Restoring the last session is unexpectedly enabled before the user chooses it"
+            )
+        }
+        ReaderSessionRestorePreference.setEnabled(true, defaults: widthDefaults)
+        guard ReaderSessionRestorePreference.isEnabled(defaults: widthDefaults) else {
+            throw AppSelfCheckFailure(
+                description: "The restore-last-session option does not survive relaunch"
+            )
+        }
         AIReplyGestureZoomPreference.setEnabled(
             true,
             defaults: widthDefaults,
@@ -547,9 +558,10 @@ enum PDFlightAppSelfChecks {
                 .appendingPathComponent("pdflight-library-drag-self-check-\(UUID().uuidString).json")
         )
         let librarySidebar = LibrarySidebarView(store: libraryStore)
-        guard librarySidebar.paperDraggingEnabledForLayoutCheck() else {
+        guard librarySidebar.paperDraggingEnabledForLayoutCheck(),
+              librarySidebar.multiplePaperSelectionEnabledForLayoutCheck() else {
             throw AppSelfCheckFailure(
-                description: "Library papers are not registered for collection drag and drop"
+                description: "Library papers do not support multi-selection drag and drop"
             )
         }
         print(

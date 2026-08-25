@@ -51,11 +51,11 @@ PDFlight 会在后台持续接收流式响应，并实时显示模型活动状�
 
 每个 PDF 标签页都有独立的聊天区域，并可创建多个会话。历史按钮会按论文分组显示全部会话，也可以直接在 Finder 中打开存储目录。记录以“每篇论文一个文件”的版本化、格式化 UTF-8 JSON 保存在 `~/Library/Application Support/dev.pdflight.reader/ai-chats`，无需数据库，复制整个目录即可备份或迁移。AI 回复原生渲染标题、列表、引用、表格、代码块、粗体/斜体 Markdown 和 LaTeX 公式，并支持 `\text{…}` 中的中文标签；强调标记可以跨越行内公式，行内公式会嵌在原段落中连续排版，超宽块级公式可以横向滚动。回复文字可以直接选择；用户和助手的消息卡顶部、底部都有复制入口，底部删除操作经确认后会同步更新本地记录。
 
-AI 功能刻意保持轻量：不建立 embedding、不运行 RAG、不开放 MCP 工具、不分析页面图像、不自动上传 PDF 页面，也不使用 WebView。API key 保存在 macOS 钥匙串中。
+AI 功能刻意保持轻量：不建立 embedding、不运行 RAG、不开放 MCP 工具、不自动截取或上传 PDF 页面，也不使用 WebView。只有用户明确粘贴、拖入或添加的图片才会发送。API key 保存在 macOS 钥匙串中。
 
 ## 文献库
 
-左侧栏默认显示 **Library**，也可以切换为当前 PDF 的 **Outline**。左右侧栏的宽度和显示状态统一属于工作区布局：在任意论文中调整后，其他现有窗口、之后新打开的论文和下次启动都会沿用同一布局。你可以创建任意层级的分类、添加 PDF，并按显示名、真实文件名或路径搜索；包括 Unfiled 在内的论文可以直接拖到目标分类。形如 `作者 - 2026 - 论文标题` 的文件默认只显示 `论文标题`。右键论文选择 **Edit display name…** 可设置自定义别名而不重命名 PDF，清空别名即可恢复自动名称。打开过的 PDF 会自动加入 Unfiled。文献库以格式化、版本化 JSON 保存在 `~/Library/Application Support/dev.pdflight.reader/paper-library.json`；从文献库移除论文不会删除本地 PDF 文件。
+左侧栏默认显示 **Library**，也可以切换为当前 PDF 的 **Outline**。左右侧栏的宽度和显示状态统一属于工作区布局：在任意论文中调整后，其他现有窗口、之后新打开的论文和下次启动都会沿用同一布局。**Recent** 按实际打开时间显示历史论文，File 菜单中也提供 **Open Recent** 和 **Clear Menu**。你可以创建任意层级的分类、添加 PDF，并按显示名、真实文件名或路径搜索；用 Command/Shift 批量选中文献后，可以一次拖放或移动到目标分类。形如 `作者 - 2026 - 论文标题` 的文件默认只显示 `论文标题`。右键论文选择 **Edit display name…** 可设置自定义别名而不重命名 PDF，清空别名即可恢复自动名称。打开过的 PDF 会自动加入 Unfiled。在应用菜单中开启 **Restore Last Session at Launch** 后，下次启动会恢复退出时仍打开的论文标签。文献库和上次会话都以格式化、版本化 JSON 保存在 `~/Library/Application Support/dev.pdflight.reader/`；从文献库移除论文不会删除本地 PDF 文件。
 
 ## 下载
 
