@@ -559,9 +559,10 @@ enum PDFlightAppSelfChecks {
         )
         let librarySidebar = LibrarySidebarView(store: libraryStore)
         guard librarySidebar.paperDraggingEnabledForLayoutCheck(),
-              librarySidebar.multiplePaperSelectionEnabledForLayoutCheck() else {
+              librarySidebar.multiplePaperSelectionEnabledForLayoutCheck(),
+              librarySidebar.recentHistoryStartsCollapsedForLayoutCheck() else {
             throw AppSelfCheckFailure(
-                description: "Library papers do not support multi-selection drag and drop"
+                description: "Library multi-selection or the collapsed Recent default is unavailable"
             )
         }
         print(

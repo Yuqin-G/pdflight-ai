@@ -22,6 +22,7 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     private var roots: [LibraryTreeItem] = []
     private var snapshot = PaperLibrarySnapshot()
     private var expandedCollectionIDs: Set<String> = []
+    private var isRecentExpanded = false
 
     init(store: PaperLibraryStore) {
         self.store = store
@@ -64,6 +65,10 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
 
     func multiplePaperSelectionEnabledForLayoutCheck() -> Bool {
         outlineView.allowsMultipleSelection
+    }
+
+    func recentHistoryStartsCollapsedForLayoutCheck() -> Bool {
+        !isRecentExpanded
     }
 
     private func configure() {
@@ -225,7 +230,11 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
 
     private func restoreExpansion(in items: [LibraryTreeItem], expandAll: Bool) {
         for item in items where item.isExpandable {
-            if expandAll || item.isVirtual || item.collection.map({ expandedCollectionIDs.contains($0.id) }) == true {
+            let shouldExpand = expandAll
+                || item.virtualKind == .unfiled
+                || (item.virtualKind == .recent && isRecentExpanded)
+                || item.collection.map({ expandedCollectionIDs.contains($0.id) }) == true
+            if shouldExpand {
                 outlineView.expandItem(item)
             }
             restoreExpansion(in: item.children, expandAll: expandAll)
@@ -265,16 +274,22 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
-        if let item = notification.userInfo?["NSObject"] as? LibraryTreeItem,
-           let id = item.collection?.id {
-            expandedCollectionIDs.insert(id)
+        if let item = notification.userInfo?["NSObject"] as? LibraryTreeItem {
+            if let id = item.collection?.id {
+                expandedCollectionIDs.insert(id)
+            } else if item.virtualKind == .recent {
+                isRecentExpanded = true
+            }
         }
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
-        if let item = notification.userInfo?["NSObject"] as? LibraryTreeItem,
-           let id = item.collection?.id {
-            expandedCollectionIDs.remove(id)
+        if let item = notification.userInfo?["NSObject"] as? LibraryTreeItem {
+            if let id = item.collection?.id {
+                expandedCollectionIDs.remove(id)
+            } else if item.virtualKind == .recent {
+                isRecentExpanded = false
+            }
         }
     }
 
