@@ -83,6 +83,7 @@ final class AIChatSidebarView: NSView {
     var onSelectConversation: ((String) -> Void)?
     var onDeleteConversation: (() -> Void)?
     var onDeleteMessage: ((String) -> Void)?
+    var onRemoveQueuedSubmission: ((String) -> Void)?
     var onShowHistory: ((NSButton) -> Void)?
     var onPresetChange: ((AIPromptPreset) -> Void)?
     var onEditPromptTemplate: ((AIPromptPreset) -> Void)?
@@ -102,6 +103,10 @@ final class AIChatSidebarView: NSView {
     private let settingsButton = NSButton()
     private let messageScrollView = AIChatMessageScrollView()
     private let messageStack = AIChatMessageStackView()
+    private let queueContainer = NSView()
+    private let queueTitleLabel = NSTextField(labelWithString: "Queued")
+    private let queueScrollView = NSScrollView()
+    private let queueStack = NSStackView()
     private let composerContainer = NSView()
     private let attachmentScrollView = NSScrollView()
     private let attachmentStack = NSStackView()
@@ -135,6 +140,7 @@ final class AIChatSidebarView: NSView {
     private var isApplyingSelection = false
     private var composerAttachments: [AIChatImageAttachment] = []
     private var attachmentHeightConstraint: NSLayoutConstraint!
+    private var queueHeightConstraint: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -291,15 +297,39 @@ final class AIChatSidebarView: NSView {
     }
 
     func setStreaming(_ streaming: Bool) {
-        sendButton.isHidden = streaming
+        sendButton.isHidden = false
         cancelButton.isHidden = !streaming
-        composer.isEditable = !streaming
-        promptButtons.values.forEach { $0.isEnabled = !streaming }
-        promptManageButton.isEnabled = !streaming
-        attachImageButton.isEnabled = !streaming
+        composer.isEditable = true
+        promptButtons.values.forEach { $0.isEnabled = true }
+        promptManageButton.isEnabled = true
+        attachImageButton.isEnabled = true
         conversationButtons.values.forEach { $0.isEnabled = !streaming }
         newConversationButton.isEnabled = !streaming
         deleteConversationButton.isEnabled = !streaming && !conversationIDs.isEmpty
+    }
+
+    func setQueuedSubmissions(_ submissions: [AIChatSubmission]) {
+        queueStack.arrangedSubviews.forEach {
+            queueStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        for (index, submission) in submissions.enumerated() {
+            let row = AIQueuedSubmissionView(submission: submission, position: index + 1)
+            row.onRemove = { [weak self] in
+                self?.onRemoveQueuedSubmission?(submission.id)
+            }
+            queueStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: queueStack.widthAnchor).isActive = true
+        }
+        queueTitleLabel.stringValue = submissions.isEmpty
+            ? "Queued"
+            : "Queued · \(submissions.count)"
+        let height: CGFloat = submissions.isEmpty
+            ? 0
+            : min(118, 25 + CGFloat(submissions.count) * 35)
+        queueContainer.isHidden = submissions.isEmpty
+        queueHeightConstraint?.constant = height
+        needsLayout = true
     }
 
     func prefill(_ text: String, attachments: [AIChatImageAttachment] = []) {
@@ -432,6 +462,17 @@ final class AIChatSidebarView: NSView {
         composerAttachments.count
     }
 
+    func composerAcceptsQueuedInputForLayoutCheck() -> Bool {
+        composer.isEditable
+            && composer.acceptsFirstResponder
+            && attachImageButton.isEnabled
+            && !sendButton.isHidden
+    }
+
+    func queuedSubmissionCountForLayoutCheck() -> Int {
+        queueStack.arrangedSubviews.count
+    }
+
     func triggerSendForLayoutCheck() {
         submitComposer()
     }
@@ -516,6 +557,31 @@ final class AIChatSidebarView: NSView {
         messageStack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 14)
         messageStack.translatesAutoresizingMaskIntoConstraints = false
         messageScrollView.documentView = messageStack
+
+        queueContainer.wantsLayer = true
+        queueContainer.layer?.cornerRadius = 8
+        queueContainer.layer?.cornerCurve = .continuous
+        queueContainer.layer?.backgroundColor = NSColor.controlBackgroundColor
+            .withAlphaComponent(0.55).cgColor
+        queueContainer.translatesAutoresizingMaskIntoConstraints = false
+        queueContainer.isHidden = true
+
+        queueTitleLabel.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        queueTitleLabel.textColor = .secondaryLabelColor
+        queueTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        queueScrollView.drawsBackground = false
+        queueScrollView.borderType = .noBorder
+        queueScrollView.hasVerticalScroller = true
+        queueScrollView.autohidesScrollers = true
+        queueScrollView.translatesAutoresizingMaskIntoConstraints = false
+        queueStack.orientation = .vertical
+        queueStack.alignment = .leading
+        queueStack.spacing = 3
+        queueStack.translatesAutoresizingMaskIntoConstraints = false
+        queueScrollView.documentView = queueStack
+        queueContainer.addSubview(queueTitleLabel)
+        queueContainer.addSubview(queueScrollView)
 
         composerContainer.wantsLayer = true
         composerContainer.layer?.cornerRadius = 10
@@ -624,11 +690,13 @@ final class AIChatSidebarView: NSView {
         addSubview(conversationRow)
         addSubview(separator)
         addSubview(messageScrollView)
+        addSubview(queueContainer)
         addSubview(composerContainer)
         addSubview(activityContainer)
         addSubview(resizeHandle, positioned: .above, relativeTo: nil)
 
         attachmentHeightConstraint = attachmentScrollView.heightAnchor.constraint(equalToConstant: 0)
+        queueHeightConstraint = queueContainer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             resizeHandle.leadingAnchor.constraint(equalTo: leadingAnchor),
             resizeHandle.topAnchor.constraint(equalTo: topAnchor),
@@ -650,8 +718,23 @@ final class AIChatSidebarView: NSView {
             messageScrollView.topAnchor.constraint(equalTo: separator.bottomAnchor),
             messageScrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             messageScrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            messageScrollView.bottomAnchor.constraint(equalTo: composerContainer.topAnchor, constant: -10),
+            messageScrollView.bottomAnchor.constraint(equalTo: queueContainer.topAnchor, constant: -7),
             messageStack.widthAnchor.constraint(equalTo: messageScrollView.contentView.widthAnchor),
+            queueContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            queueContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            queueContainer.bottomAnchor.constraint(equalTo: composerContainer.topAnchor, constant: -7),
+            queueHeightConstraint,
+            queueTitleLabel.topAnchor.constraint(equalTo: queueContainer.topAnchor, constant: 6),
+            queueTitleLabel.leadingAnchor.constraint(equalTo: queueContainer.leadingAnchor, constant: 9),
+            queueTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: queueContainer.trailingAnchor, constant: -9),
+            queueScrollView.topAnchor.constraint(equalTo: queueTitleLabel.bottomAnchor, constant: 2),
+            queueScrollView.leadingAnchor.constraint(equalTo: queueContainer.leadingAnchor, constant: 5),
+            queueScrollView.trailingAnchor.constraint(equalTo: queueContainer.trailingAnchor, constant: -5),
+            queueScrollView.bottomAnchor.constraint(equalTo: queueContainer.bottomAnchor, constant: -5),
+            queueStack.leadingAnchor.constraint(equalTo: queueScrollView.contentView.leadingAnchor),
+            queueStack.topAnchor.constraint(equalTo: queueScrollView.contentView.topAnchor),
+            queueStack.trailingAnchor.constraint(equalTo: queueScrollView.contentView.trailingAnchor),
+            queueStack.widthAnchor.constraint(equalTo: queueScrollView.contentView.widthAnchor),
             composerContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             composerContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             attachmentScrollView.topAnchor.constraint(equalTo: composerContainer.topAnchor, constant: 5),
@@ -689,6 +772,7 @@ final class AIChatSidebarView: NSView {
 
         setActivity(.ready, detail: "No prompt sends only the visible chat.")
         setPromptTemplates(AIPromptTemplate.defaults, selectedPreset: .defaultForNewConversation)
+        setQueuedSubmissions([])
         install([])
     }
 
@@ -2070,6 +2154,80 @@ private final class AIChatDisplayMathScrollView: NSScrollView {
 private final class AIChatSelectableTextField: NSTextField {
     override var acceptsFirstResponder: Bool {
         isSelectable || isEditable
+    }
+}
+
+@MainActor
+private final class AIQueuedSubmissionView: NSView {
+    var onRemove: (() -> Void)?
+
+    private let removeButton = NSButton()
+
+    init(submission: AIChatSubmission, position: Int) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let positionLabel = NSTextField(labelWithString: "\(position)")
+        positionLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
+        positionLabel.textColor = .secondaryLabelColor
+        positionLabel.alignment = .center
+        positionLabel.wantsLayer = true
+        positionLabel.layer?.cornerRadius = 8
+        positionLabel.layer?.backgroundColor = NSColor.separatorColor
+            .withAlphaComponent(0.35).cgColor
+        positionLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let trimmedQuestion = submission.question
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let question = trimmedQuestion.isEmpty ? "Image message" : trimmedQuestion
+        let imageSuffix = submission.imageAttachments.isEmpty
+            ? ""
+            : " · \(submission.imageAttachments.count) image\(submission.imageAttachments.count == 1 ? "" : "s")"
+        let summaryLabel = NSTextField(labelWithString: question + imageSuffix)
+        summaryLabel.font = .systemFont(ofSize: 11.5)
+        summaryLabel.textColor = .labelColor
+        summaryLabel.lineBreakMode = .byTruncatingTail
+        summaryLabel.maximumNumberOfLines = 1
+        summaryLabel.toolTip = question + imageSuffix
+        summaryLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        removeButton.image = NSImage(
+            systemSymbolName: "xmark",
+            accessibilityDescription: "Remove queued message"
+        )
+        removeButton.isBordered = false
+        removeButton.contentTintColor = .secondaryLabelColor
+        removeButton.toolTip = "Remove from queue"
+        removeButton.target = self
+        removeButton.action = #selector(removePressed(_:))
+        removeButton.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(positionLabel)
+        addSubview(summaryLabel)
+        addSubview(removeButton)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 32),
+            positionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            positionLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            positionLabel.widthAnchor.constraint(equalToConstant: 17),
+            positionLabel.heightAnchor.constraint(equalToConstant: 17),
+            summaryLabel.leadingAnchor.constraint(equalTo: positionLabel.trailingAnchor, constant: 7),
+            summaryLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            removeButton.leadingAnchor.constraint(equalTo: summaryLabel.trailingAnchor, constant: 5),
+            removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            removeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            removeButton.widthAnchor.constraint(equalToConstant: 22),
+            removeButton.heightAnchor.constraint(equalToConstant: 22)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func removePressed(_ sender: Any?) {
+        onRemove?()
     }
 }
 

@@ -25,6 +25,59 @@ public struct AIChatImageAttachment: Codable, Sendable, Equatable, Identifiable 
     }
 }
 
+public struct AIChatSubmission: Sendable, Equatable, Identifiable {
+    public let id: String
+    public var question: String
+    public var imageAttachments: [AIChatImageAttachment]
+    public var promptPreset: AIPromptPreset
+    public let createdAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        question: String,
+        imageAttachments: [AIChatImageAttachment] = [],
+        promptPreset: AIPromptPreset,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.question = question
+        self.imageAttachments = imageAttachments
+        self.promptPreset = promptPreset
+        self.createdAt = createdAt
+    }
+}
+
+public struct AIChatSubmissionQueue: Sendable, Equatable {
+    public private(set) var submissions: [AIChatSubmission]
+
+    public init(submissions: [AIChatSubmission] = []) {
+        self.submissions = submissions
+    }
+
+    public var count: Int { submissions.count }
+    public var isEmpty: Bool { submissions.isEmpty }
+
+    public mutating func enqueue(_ submission: AIChatSubmission) {
+        submissions.append(submission)
+    }
+
+    @discardableResult
+    public mutating func dequeue() -> AIChatSubmission? {
+        guard !submissions.isEmpty else { return nil }
+        return submissions.removeFirst()
+    }
+
+    @discardableResult
+    public mutating func remove(id: String) -> AIChatSubmission? {
+        guard let index = submissions.firstIndex(where: { $0.id == id }) else { return nil }
+        return submissions.remove(at: index)
+    }
+
+    public mutating func removeAll() {
+        submissions.removeAll()
+    }
+}
+
 public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let role: AIChatRole

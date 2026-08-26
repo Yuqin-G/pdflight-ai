@@ -334,6 +334,32 @@ enum PDFlightAppSelfChecks {
         guard sentImageIDs == [pastedImage.id] else {
             throw AppSelfCheckFailure(description: "The composer did not send its image attachment")
         }
+        askSidebar.setStreaming(true)
+        guard askSidebar.composerAcceptsQueuedInputForLayoutCheck() else {
+            throw AppSelfCheckFailure(
+                description: "The Ask PDF composer cannot accept text or pasted images while the model is active"
+            )
+        }
+        askSidebar.setQueuedSubmissions([
+            AIChatSubmission(
+                id: "queued-text",
+                question: "Explain the method",
+                promptPreset: .none
+            ),
+            AIChatSubmission(
+                id: "queued-image",
+                question: "",
+                imageAttachments: [pastedImage],
+                promptPreset: .none
+            )
+        ])
+        guard askSidebar.queuedSubmissionCountForLayoutCheck() == 2 else {
+            throw AppSelfCheckFailure(
+                description: "Queued Ask PDF messages are not visible above the composer"
+            )
+        }
+        askSidebar.setQueuedSubmissions([])
+        askSidebar.setStreaming(false)
 
         let settingsForm = AISettingsFormView(
             configuration: AIProviderConfiguration(

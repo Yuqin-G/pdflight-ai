@@ -28,6 +28,8 @@ enum PDFlightAIChecks {
         print("PASS: Universal Web API requests bind one local conversation to one web conversation")
         try imageAttachmentsStayPortableAndUseMultimodalRequestContent()
         print("PASS: chat images stay portable and use OpenAI-compatible multimodal content")
+        try queuedChatSubmissionsRemainFIFOAndKeepImages()
+        print("PASS: chat submissions queue in FIFO order and keep pasted images")
         try onlyLocalQwenUsesBoundWebConversations()
         print("PASS: only local Universal Web API Qwen requests use web conversation binding")
         try messageContentSeparatesMarkdownAndLatex()
@@ -270,6 +272,24 @@ enum PDFlightAIChecks {
         let textJSON = try checkNotNil(JSONSerialization.jsonObject(with: textBody) as? [String: Any], "expected text JSON")
         let textMessages = try checkNotNil(textJSON["messages"] as? [[String: Any]], "expected text messages")
         try check(textMessages.first?["content"] as? String == "text only", "expected text-only content to stay a string")
+    }
+
+    private static func queuedChatSubmissionsRemainFIFOAndKeepImages() throws {
+        let image = AIChatImageAttachment(
+            id: "queued-image",
+            fileName: "figure.png",
+            mimeType: "image/png",
+            data: Data([1, 2, 3])
+        )
+        var queue = AIChatSubmissionQueue()
+        let first = AIChatSubmission(question: "first", imageAttachments: [image], promptPreset: .none)
+        let second = AIChatSubmission(question: "second", promptPreset: .reading)
+        queue.enqueue(first)
+        queue.enqueue(second)
+        try check(queue.count == 2, "expected both submissions to be visible in the queue")
+        try check(queue.dequeue() == first, "expected FIFO dequeue with image attachment intact")
+        try check(queue.dequeue() == second, "expected the second submission after the first")
+        try check(queue.isEmpty, "expected no queued work after both submissions")
     }
 
     private static func onlyLocalQwenUsesBoundWebConversations() throws {

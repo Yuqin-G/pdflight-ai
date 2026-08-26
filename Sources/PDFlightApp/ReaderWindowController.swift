@@ -288,11 +288,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private var activeAIPlaceholderID: String?
     private var aiHistorySaveTask: Task<Void, Never>?
     private var aiHistoryLoaded = false
-    private var pendingAISubmission: (
-        question: String,
-        attachments: [AIChatImageAttachment],
-        preset: AIPromptPreset
-    )?
+    private var aiSubmissionQueue = AIChatSubmissionQueue()
     private var pendingAIConversationID: String?
     private var aiPromptTemplates = AIPromptTemplate.defaults
     private var aiConversationGeneration = 0
@@ -936,7 +932,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         navigationSidebar.isHidden = false
         outlineButton.state = .on
         aiSidebar.onSend = { [weak self] question, attachments, preset in
-            self?.sendAIMessage(question, attachments: attachments, preset: preset)
+            self?.submitAIMessage(question, attachments: attachments, preset: preset)
         }
         aiSidebar.onConfigure = { [weak self] in
             self?.configureAI(nil)
@@ -952,6 +948,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         }
         aiSidebar.onDeleteMessage = { [weak self] messageID in
             self?.deleteAIMessage(messageID)
+        }
+        aiSidebar.onRemoveQueuedSubmission = { [weak self] submissionID in
+            guard let self else { return }
+            aiSubmissionQueue.remove(id: submissionID)
+            refreshQueuedAISubmissions()
         }
         aiSidebar.onShowHistory = { [weak self] _ in
             self?.showAIHistoryMenu()
@@ -1442,34 +1443,64 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             let conversationID = pendingAIConversationID ?? history.activeConversationID
             pendingAIConversationID = nil
             activateAIConversation(conversationID, persistSelection: false)
-            if let submission = pendingAISubmission {
-                pendingAISubmission = nil
-                sendAIMessage(
-                    submission.question,
-                    attachments: submission.attachments,
-                    preset: submission.preset
-                )
-            }
+            processNextAISubmissionIfNeeded()
         }
     }
 
-    private func sendAIMessage(
+    private func submitAIMessage(
         _ question: String,
         attachments: [AIChatImageAttachment] = [],
         preset: AIPromptPreset
     ) {
-        guard aiTask == nil else { return }
+        let submission = AIChatSubmission(
+            question: question,
+            imageAttachments: attachments,
+            promptPreset: preset
+        )
+        guard aiTask == nil, aiHistoryLoaded else {
+            aiSubmissionQueue.enqueue(submission)
+            refreshQueuedAISubmissions()
+            if !aiHistoryLoaded {
+                aiSidebar.setActivity(.loading, detail: "Opening this PDF's local conversation")
+            }
+            return
+        }
+        startAIMessage(submission)
+    }
+
+    private func processNextAISubmissionIfNeeded() {
+        guard aiTask == nil, aiHistoryLoaded,
+              let submission = aiSubmissionQueue.dequeue() else { return }
+        refreshQueuedAISubmissions()
+        startAIMessage(submission)
+    }
+
+    private func refreshQueuedAISubmissions() {
+        aiSidebar.setQueuedSubmissions(aiSubmissionQueue.submissions)
+    }
+
+    private func startAIMessage(_ submission: AIChatSubmission) {
+        guard aiTask == nil else {
+            aiSubmissionQueue.enqueue(submission)
+            refreshQueuedAISubmissions()
+            return
+        }
         guard aiHistoryLoaded else {
-            pendingAISubmission = (question, attachments, preset)
+            aiSubmissionQueue.enqueue(submission)
+            refreshQueuedAISubmissions()
             aiSidebar.setActivity(.loading, detail: "Opening this PDF's local conversation")
             return
         }
+
+        let question = submission.question
+        let attachments = submission.imageAttachments
+        let preset = submission.promptPreset
 
         let configuration = aiConfigurationStore.configuration()
         guard !configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             aiSidebar.prefill(question, attachments: attachments)
             if showAISettings() {
-                sendAIMessage(question, attachments: attachments, preset: preset)
+                startAIMessage(submission)
             } else {
                 aiSidebar.setActivity(.failed, detail: "Choose an AI provider and model before sending")
             }
@@ -1543,6 +1574,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 }
                 aiSidebar.setStreaming(false)
                 aiTask = nil
+                processNextAISubmissionIfNeeded()
             }
             do {
                 let requestMessages = AIChatRequestBuilder.messages(
@@ -1779,7 +1811,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
 
         aiTask?.cancel()
         aiConversationGeneration += 1
-        pendingAISubmission = nil
+        aiSubmissionQueue.removeAll()
+        refreshQueuedAISubmissions()
         history.activeConversationID = conversationID
         aiHistory = history
         aiMessages = history.conversations[index].messages.filter { $0.role != .system }
