@@ -111,7 +111,7 @@ final class AIChatSidebarView: NSView {
     private let attachmentScrollView = NSScrollView()
     private let attachmentStack = NSStackView()
     private let composerScrollView = NSScrollView()
-    private let composer = AIChatComposerTextView(frame: .zero, textContainer: nil)
+    private let composer = AIChatComposerTextView(frame: .zero)
     private let promptModeScrollView = NSScrollView()
     private let promptModeStack = NSStackView()
     private let promptManageButton = NSButton()
@@ -490,6 +490,18 @@ final class AIChatSidebarView: NSView {
 
     func composerAcceptsActivationClickForLayoutCheck() -> Bool {
         composer.acceptsFirstMouse(for: nil)
+    }
+
+    func composerAcceptsTextInsertionForLayoutCheck(_ text: String) -> Bool {
+        let original = composer.string
+        let originalSelection = composer.selectedRange()
+        defer {
+            composer.string = original
+            composer.setSelectedRange(originalSelection)
+        }
+        composer.setSelectedRange(NSRange(location: (original as NSString).length, length: 0))
+        composer.insertText(text, replacementRange: composer.selectedRange())
+        return composer.string == original + text
     }
 
     func queuedSubmissionCountForLayoutCheck() -> Int {
@@ -2277,6 +2289,11 @@ private final class AIChatComposerTextView: NSTextView {
     var onPasteboardImages: ((NSPasteboard) -> Bool)?
     var placeholderString = "" {
         didSet { needsDisplay = true }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL, .png, .tiff])
     }
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {

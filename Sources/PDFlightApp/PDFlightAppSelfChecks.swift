@@ -350,6 +350,11 @@ enum PDFlightAppSelfChecks {
                 description: "The first click after returning to PDFlight does not activate the Ask PDF composer"
             )
         }
+        guard askSidebar.composerAcceptsTextInsertionForLayoutCheck("input-probe") else {
+            throw AppSelfCheckFailure(
+                description: "The Ask PDF composer cannot insert ordinary keyboard text"
+            )
+        }
         askSidebar.setQueuedSubmissions([
             AIChatSubmission(
                 id: "queued-text",
