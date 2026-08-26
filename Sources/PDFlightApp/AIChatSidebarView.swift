@@ -1953,7 +1953,7 @@ private final class AIChatRenderedContentView: NSStackView {
         color: NSColor
     ) -> NSAttributedString? {
         let label = MTMathUILabel()
-        label.latex = latex
+        label.latex = IOSMathLatexCompatibility.renderable(latex)
         guard label.error == nil else { return nil }
         label.fontSize = fontSize + 0.5
         label.mode = .text
@@ -2112,7 +2112,7 @@ private final class AIChatRenderedContentView: NSStackView {
     @discardableResult
     private func addMath(_ latex: String, display: Bool) -> Bool {
         let label = MTMathUILabel()
-        label.latex = latex
+        label.latex = IOSMathLatexCompatibility.renderable(latex)
         guard label.error == nil else { return false }
         label.fontSize = display ? bodyFontSize + 2.5 : bodyFontSize + 0.5
         label.mode = display ? .display : .text

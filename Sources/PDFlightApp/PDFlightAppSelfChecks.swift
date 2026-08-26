@@ -19,17 +19,25 @@ enum PDFlightAppSelfChecks {
         let formulas = [
             "r_n^{\\text{final}} =",
             "W_{ij} = \\exp(-d^2(f_i, f_j)/2",
+            "M_\\theta \\xrightarrow{\\text{在原始 SafeWatch 上微调}} M_{\\theta_{sw}}",
             casesLatex,
             labeledGRPOLatex
         ]
         for formula in formulas {
             let label = MTMathUILabel()
-            label.latex = formula
+            label.latex = IOSMathLatexCompatibility.renderable(formula)
             guard label.error == nil else {
                 throw AppSelfCheckFailure(
                     description: "iosMath rejected recovered formula \(formula): \(label.error!)"
                 )
             }
+        }
+        guard IOSMathLatexCompatibility.renderable(
+            "M_\\theta \\xrightarrow{\\text{在原始 SafeWatch 上微调}} M_{\\theta_{sw}}"
+        ) == "M_\\theta \\overset{\\text{在原始 SafeWatch 上微调}}{\\longrightarrow} M_{\\theta_{sw}}" else {
+            throw AppSelfCheckFailure(
+                description: "iosMath compatibility did not preserve the extended-arrow label"
+            )
         }
         print("PASS: iosMath accepts complete and recovered Qwen formulas")
     }
