@@ -469,6 +469,29 @@ final class AIChatSidebarView: NSView {
             && !sendButton.isHidden
     }
 
+    func composerReceivesPointerForLayoutCheck() -> Bool {
+        layoutSubtreeIfNeeded()
+        composerContainer.layoutSubtreeIfNeeded()
+        composerScrollView.layoutSubtreeIfNeeded()
+        let visibleBounds = composerScrollView.contentView.bounds
+        guard visibleBounds.width > 1, visibleBounds.height > 1,
+              composer.frame.width > 1, composer.frame.height > 1 else { return false }
+        let centerInSuperview = composerScrollView.contentView.convert(
+            NSPoint(x: visibleBounds.midX, y: visibleBounds.midY),
+            to: superview
+        )
+        var target = hitTest(centerInSuperview)
+        while let view = target {
+            if view === composer { return true }
+            target = view.superview
+        }
+        return false
+    }
+
+    func composerAcceptsActivationClickForLayoutCheck() -> Bool {
+        composer.acceptsFirstMouse(for: nil)
+    }
+
     func queuedSubmissionCountForLayoutCheck() -> Int {
         queueStack.arrangedSubviews.count
     }
@@ -593,6 +616,8 @@ final class AIChatSidebarView: NSView {
         composer.font = .systemFont(ofSize: 13)
         composer.textContainerInset = NSSize(width: 9, height: 8)
         composer.isRichText = false
+        composer.isEditable = true
+        composer.isSelectable = true
         composer.drawsBackground = false
         composer.placeholderString = "Ask about this paper…"
         composer.isAutomaticQuoteSubstitutionEnabled = false
@@ -2267,6 +2292,17 @@ private final class AIChatComposerTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if isEditable {
+            window?.makeFirstResponder(self)
+        }
+        super.mouseDown(with: event)
     }
 
     override func draw(_ dirtyRect: NSRect) {

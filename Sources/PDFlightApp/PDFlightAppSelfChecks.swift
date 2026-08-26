@@ -340,6 +340,16 @@ enum PDFlightAppSelfChecks {
                 description: "The Ask PDF composer cannot accept text or pasted images while the model is active"
             )
         }
+        guard askSidebar.composerReceivesPointerForLayoutCheck() else {
+            throw AppSelfCheckFailure(
+                description: "Clicking the visible Ask PDF composer does not reach its text view"
+            )
+        }
+        guard askSidebar.composerAcceptsActivationClickForLayoutCheck() else {
+            throw AppSelfCheckFailure(
+                description: "The first click after returning to PDFlight does not activate the Ask PDF composer"
+            )
+        }
         askSidebar.setQueuedSubmissions([
             AIChatSubmission(
                 id: "queued-text",
