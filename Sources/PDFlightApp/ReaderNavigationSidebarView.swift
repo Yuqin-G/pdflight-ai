@@ -4,6 +4,8 @@ import PDFlightCore
 @MainActor
 final class ReaderNavigationSidebarView: NSVisualEffectView {
     var onResizeBy: ((CGFloat) -> Void)?
+    var onModeChange: ((Int) -> Void)?
+    private(set) var selectedMode = 0
     var onActivateOutline: ((DocumentOutlineEntry) -> Void)? {
         didSet { outlineSidebar.onActivate = onActivateOutline }
     }
@@ -85,11 +87,21 @@ final class ReaderNavigationSidebarView: NSVisualEffectView {
         ])
     }
 
-    @objc private func modeChanged(_ sender: NSSegmentedControl) {
-        let showLibrary = sender.selectedSegment == 0
+    /// 0 = Library, 1 = Outline. `notify` is false when restoring a
+    /// persisted/cross-window mode so we don't echo the change back.
+    func selectMode(_ mode: Int, notify: Bool = true) {
+        let clamped = mode == 1 ? 1 : 0
+        selectedMode = clamped
+        modeControl.selectedSegment = clamped
+        let showLibrary = clamped == 0
         librarySidebar.isHidden = !showLibrary
         outlineSidebar.isHidden = showLibrary
         if showLibrary { librarySidebar.reload() }
+        if notify { onModeChange?(clamped) }
+    }
+
+    @objc private func modeChanged(_ sender: NSSegmentedControl) {
+        selectMode(sender.selectedSegment)
     }
 }
 

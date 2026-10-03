@@ -117,6 +117,7 @@ final class ReaderWorkspaceLayoutCoordinator {
     private(set) var aiWidth: CGFloat
     private(set) var navigationVisible: Bool
     private(set) var aiVisible: Bool
+    private(set) var navigationMode: Int
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -134,6 +135,8 @@ final class ReaderWorkspaceLayoutCoordinator {
             ?? true
         aiVisible = defaults.object(forKey: "reader.aiSidebarVisible") as? Bool
             ?? true
+        let storedNavigationMode = defaults.integer(forKey: "reader.navigationSidebarMode")
+        navigationMode = storedNavigationMode == 1 ? 1 : 0
     }
 
     func bindNavigationSidebar(_ view: NSView) -> NSLayoutConstraint {
@@ -191,6 +194,17 @@ final class ReaderWorkspaceLayoutCoordinator {
     ) {
         aiVisible = visible
         defaults.set(visible, forKey: "reader.aiSidebarVisible")
+        notify(source: source, broadcast: broadcast)
+    }
+
+    /// 0 = Library, 1 = Outline. Persisted so the active sidebar survives restarts.
+    func setNavigationMode(
+        _ mode: Int,
+        source: AnyObject? = nil,
+        broadcast: Bool = true
+    ) {
+        navigationMode = mode == 1 ? 1 : 0
+        defaults.set(navigationMode, forKey: "reader.navigationSidebarMode")
         notify(source: source, broadcast: broadcast)
     }
 
@@ -952,9 +966,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         navigationSidebar.onResizeBy = { [weak self] delta in
             self?.resizeNavigationSidebar(by: delta)
         }
+        navigationSidebar.onModeChange = { [weak self] mode in
+            guard let self else { return }
+            workspaceLayoutCoordinator.setNavigationMode(mode, source: self)
+        }
         navigationSidebar.translatesAutoresizingMaskIntoConstraints = false
-        navigationSidebar.isHidden = false
-        outlineButton.state = .on
+        navigationSidebar.isHidden = !workspaceLayoutCoordinator.navigationVisible
+        outlineButton.state = workspaceLayoutCoordinator.navigationVisible ? .on : .off
         aiSidebar.onSend = { [weak self] question, attachments, preset, includeCurrentPDF in
             self?.submitAIMessage(
                 question,
@@ -1007,10 +1025,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiSidebar.onResizeEnded = { [weak self] in
             self?.finishResizingAISidebar()
         }
-        aiSidebar.isHidden = true
+        aiSidebar.isHidden = !workspaceLayoutCoordinator.aiVisible
         aiSidebar.setPaperTitle(paperTitle)
         aiSidebar.setReplyGestureZoomEnabled(AIReplyGestureZoomPreference.isEnabled())
-        aiButton.state = .off
+        aiButton.state = workspaceLayoutCoordinator.aiVisible ? .on : .off
         contentSplitView.isVertical = true
         contentSplitView.dividerStyle = .thin
         contentSplitView.delegate = self
@@ -1052,6 +1070,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             contentSplitView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
         window.contentView?.layoutSubtreeIfNeeded()
+        navigationSidebar.selectMode(
+            workspaceLayoutCoordinator.navigationMode,
+            notify: false
+        )
         setOutlineVisible(
             workspaceLayoutCoordinator.navigationVisible,
             relayoutDocument: false,
@@ -1358,6 +1380,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
            source === self {
             return
         }
+        navigationSidebar.selectMode(
+            workspaceLayoutCoordinator.navigationMode,
+            notify: false
+        )
         setOutlineVisible(
             workspaceLayoutCoordinator.navigationVisible,
             persistLayout: false
