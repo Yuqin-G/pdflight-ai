@@ -674,10 +674,11 @@ final class AIChatSidebarView: NSView {
         queueContainer.addSubview(queueScrollView)
 
         composerContainer.wantsLayer = true
-        composerContainer.layer?.cornerRadius = 10
+        composerContainer.layer?.cornerRadius = 13
+        composerContainer.layer?.cornerCurve = .continuous
         composerContainer.layer?.borderWidth = 1
-        composerContainer.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
-        composerContainer.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.75).cgColor
+        composerContainer.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.42).cgColor
+        composerContainer.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.9).cgColor
         composerContainer.translatesAutoresizingMaskIntoConstraints = false
 
         composer.font = .systemFont(ofSize: 13)
@@ -694,6 +695,7 @@ final class AIChatSidebarView: NSView {
         composer.autoresizingMask = [.width]
         composer.textContainer?.widthTracksTextView = true
         composer.onSubmit = { [weak self] in self?.submitComposer() }
+        composer.onFocusChange = { [weak self] in self?.updateComposerFocusRing() }
         composer.onPasteboardImages = { [weak self] pasteboard in
             self?.addImages(from: pasteboard) ?? false
         }
@@ -735,10 +737,27 @@ final class AIChatSidebarView: NSView {
         promptManageButton.action = #selector(managePromptsPressed(_:))
 
         configureComposerAction(sendButton, symbol: "arrow.up", tooltip: "Send")
+        sendButton.image = NSImage(
+            systemSymbolName: "arrow.up",
+            accessibilityDescription: "Send"
+        )?.withSymbolConfiguration(.init(pointSize: 10, weight: .bold))
+        sendButton.wantsLayer = true
+        sendButton.layer?.cornerRadius = 11
+        sendButton.layer?.cornerCurve = .continuous
+        sendButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        sendButton.contentTintColor = .white
         sendButton.keyEquivalent = "\r"
         sendButton.action = #selector(sendPressed(_:))
         configureComposerAction(cancelButton, symbol: "stop.fill", tooltip: "Stop")
-        cancelButton.contentTintColor = .systemRed
+        cancelButton.image = NSImage(
+            systemSymbolName: "stop.fill",
+            accessibilityDescription: "Stop"
+        )?.withSymbolConfiguration(.init(pointSize: 9, weight: .bold))
+        cancelButton.wantsLayer = true
+        cancelButton.layer?.cornerRadius = 11
+        cancelButton.layer?.cornerCurve = .continuous
+        cancelButton.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        cancelButton.contentTintColor = .labelColor
         cancelButton.action = #selector(cancelPressed(_:))
         cancelButton.isHidden = true
 
@@ -807,6 +826,10 @@ final class AIChatSidebarView: NSView {
         attachmentHeightConstraint = attachmentScrollView.heightAnchor.constraint(equalToConstant: 0)
         queueHeightConstraint = queueContainer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
+            sendButton.widthAnchor.constraint(equalToConstant: 22),
+            sendButton.heightAnchor.constraint(equalToConstant: 22),
+            cancelButton.widthAnchor.constraint(equalToConstant: 22),
+            cancelButton.heightAnchor.constraint(equalToConstant: 22),
             resizeHandle.leadingAnchor.constraint(equalTo: leadingAnchor),
             resizeHandle.topAnchor.constraint(equalTo: topAnchor),
             resizeHandle.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -896,10 +919,21 @@ final class AIChatSidebarView: NSView {
 
     private func configureComposerAction(_ button: NSButton, symbol: String, tooltip: String) {
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
-        button.bezelStyle = .rounded
+        button.bezelStyle = .inline
+        button.isBordered = false
         button.controlSize = .small
+        button.contentTintColor = .secondaryLabelColor
         button.toolTip = tooltip
         button.target = self
+    }
+
+    private func updateComposerFocusRing() {
+        let focused = composerContainer.window?.firstResponder === composer
+        composerContainer.layer?.borderColor = (
+            focused
+                ? NSColor.controlAccentColor.withAlphaComponent(0.55)
+                : NSColor.separatorColor.withAlphaComponent(0.42)
+        ).cgColor
     }
 
     private func configureHorizontalStrip(scrollView: NSScrollView, stack: NSStackView) {
@@ -2575,6 +2609,7 @@ private final class AIChatTableGridView: NSGridView {
 @MainActor
 private final class AIChatComposerTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    var onFocusChange: (() -> Void)?
     var onPasteboardImages: ((NSPasteboard) -> Bool)?
     var pasteboardProvider: () -> NSPasteboard = { .general }
     var placeholderString = "" {
@@ -2599,6 +2634,18 @@ private final class AIChatComposerTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        onFocusChange?()
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        onFocusChange?()
+        return resigned
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
