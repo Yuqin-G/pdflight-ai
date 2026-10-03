@@ -1958,12 +1958,18 @@ private final class AIChatRenderedContentView: NSStackView {
         case let .paragraph(text):
             addRichContent(text)
         case let .unorderedList(items):
+            let indent = listItemIndent(marker: "•")
             for item in items {
-                addRichContent("• \(item)", paragraphSpacing: 2)
+                addRichContent(item, paragraphSpacing: 2, hangingIndent: ("•", indent))
             }
         case let .orderedList(start, items):
             for (offset, item) in items.enumerated() {
-                addRichContent("\(start + offset). \(item)", paragraphSpacing: 2)
+                let marker = "\(start + offset)."
+                addRichContent(
+                    item,
+                    paragraphSpacing: 2,
+                    hangingIndent: (marker, listItemIndent(marker: marker))
+                )
             }
         case let .blockquote(text):
             addRichContent(
@@ -1984,12 +1990,19 @@ private final class AIChatRenderedContentView: NSStackView {
         }
     }
 
+    private func listItemIndent(marker: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: bodyFontSize)
+        let width = (marker as NSString).size(withAttributes: [.font: font]).width
+        return (width + bodyFontSize * 0.5).rounded(.up)
+    }
+
     private func addRichContent(
         _ content: String,
         fontSize: CGFloat? = nil,
         weight: NSFont.Weight = .regular,
         color: NSColor = .labelColor,
-        paragraphSpacing: CGFloat? = nil
+        paragraphSpacing: CGFloat? = nil,
+        hangingIndent: (marker: String, indent: CGFloat)? = nil
     ) {
         var inlineSegments: [AIMessageContentSegment] = []
         for segment in AIMessageContentParser.segments(in: content) {
@@ -2002,7 +2015,8 @@ private final class AIChatRenderedContentView: NSStackView {
                     fontSize: fontSize,
                     weight: weight,
                     color: color,
-                    paragraphSpacing: paragraphSpacing
+                    paragraphSpacing: paragraphSpacing,
+                    hangingIndent: hangingIndent
                 )
                 inlineSegments.removeAll(keepingCapacity: true)
                 if !addMath(latex, display: true) {
@@ -2022,7 +2036,8 @@ private final class AIChatRenderedContentView: NSStackView {
             fontSize: fontSize,
             weight: weight,
             color: color,
-            paragraphSpacing: paragraphSpacing
+            paragraphSpacing: paragraphSpacing,
+            hangingIndent: hangingIndent
         )
     }
 
@@ -2031,7 +2046,8 @@ private final class AIChatRenderedContentView: NSStackView {
         fontSize: CGFloat?,
         weight: NSFont.Weight,
         color: NSColor,
-        paragraphSpacing: CGFloat?
+        paragraphSpacing: CGFloat?,
+        hangingIndent: (marker: String, indent: CGFloat)? = nil
     ) {
         guard !segments.isEmpty else { return }
         let resolvedSize = fontSize ?? bodyFontSize
@@ -2063,7 +2079,8 @@ private final class AIChatRenderedContentView: NSStackView {
             fontSize: resolvedSize,
             weight: weight,
             color: color,
-            paragraphSpacing: paragraphSpacing
+            paragraphSpacing: paragraphSpacing,
+            hangingIndent: hangingIndent
         ))
         for replacement in mathReplacements {
             let range = (combined.string as NSString).range(of: replacement.token)
@@ -2110,19 +2127,29 @@ private final class AIChatRenderedContentView: NSStackView {
         fontSize: CGFloat,
         weight: NSFont.Weight,
         color: NSColor,
-        paragraphSpacing: CGFloat?
+        paragraphSpacing: CGFloat?,
+        hangingIndent: (marker: String, indent: CGFloat)? = nil
     ) -> NSAttributedString {
         let resolvedSize = fontSize
         let bodyFont = NSFont.systemFont(ofSize: resolvedSize, weight: weight)
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = max(2, resolvedSize * 0.26)
         paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(4, resolvedSize * 0.36)
+        if let hangingIndent {
+            paragraphStyle.headIndent = hangingIndent.indent
+            paragraphStyle.firstLineHeadIndent = 0
+            paragraphStyle.tabStops = [NSTextTab(
+                textAlignment: .left,
+                location: hangingIndent.indent
+            )]
+        }
+        let styled: NSMutableAttributedString
         if markdown,
            let attributed = try? AttributedString(
             markdown: text,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
            ) {
-            let styled = NSMutableAttributedString(attributedString: NSAttributedString(attributed))
+            styled = NSMutableAttributedString(attributedString: NSAttributedString(attributed))
             styled.addAttribute(
                 .foregroundColor,
                 value: color,
@@ -2138,9 +2165,8 @@ private final class AIChatRenderedContentView: NSStackView {
                 baseSize: resolvedSize,
                 baseWeight: weight
             )
-            return styled
         } else {
-            return NSMutableAttributedString(
+            styled = NSMutableAttributedString(
                 string: text,
                 attributes: [
                     .font: bodyFont,
@@ -2149,6 +2175,22 @@ private final class AIChatRenderedContentView: NSStackView {
                 ]
             )
         }
+        if let hangingIndent {
+            let markerFont = NSFont.systemFont(ofSize: resolvedSize, weight: .medium)
+            styled.insert(
+                NSAttributedString(
+                    string: "\(hangingIndent.marker)\t",
+                    attributes: [.font: markerFont, .foregroundColor: NSColor.secondaryLabelColor]
+                ),
+                at: 0
+            )
+            styled.addAttribute(
+                .paragraphStyle,
+                value: paragraphStyle,
+                range: NSRange(location: 0, length: styled.length)
+            )
+        }
+        return styled
     }
 
     private func addAttributedText(_ attributed: NSAttributedString) {
