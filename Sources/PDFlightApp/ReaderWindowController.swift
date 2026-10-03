@@ -7,6 +7,7 @@ import PDFlightMuPDF
 enum ReaderPageKeyAction: Equatable {
     case previous
     case next
+    case highlightSelection
 }
 
 enum ReaderPageKeyRouting {
@@ -20,6 +21,7 @@ enum ReaderPageKeyRouting {
             return nil
         }
         switch keyCode {
+        case 14: return .highlightSelection
         case 123: return .previous
         case 124: return .next
         default: return nil
@@ -291,8 +293,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private static let maxRenderPixels: Double = 25_000_000
     private static let maxRenderDimension: Double = 8192
     /// Whether the host window was full screen when the app last quit.
-    /// Windowed frame itself is covered by `setFrameAutosaveName`.
     static let windowFullScreenDefaultsKey = "reader.windowFullScreen"
+    /// Windowed frame persisted manually; shared autosave names break
+    /// once tabbed windows all claim the same name.
+    static let windowFrameDefaultsKey = "reader.windowFrame"
     private var tool: ReaderTool = .select
     private var navigationHistory: [DocumentViewportBookmark] = []
     private var loadTask: Task<Void, Never>?
@@ -370,13 +374,25 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         )
         window.title = url.lastPathComponent
         window.minSize = NSSize(width: 620, height: 400)
-        window.setFrameAutosaveName("PDFlightReaderWorkspaceWindow")
+        if let stored = UserDefaults.standard.string(
+            forKey: ReaderWindowController.windowFrameDefaultsKey
+        ) {
+            let rect = NSRectFromString(stored)
+            let onScreen = NSScreen.screens.contains {
+                !$0.visibleFrame.intersection(rect).isEmpty
+            }
+            if onScreen, rect.width >= window.minSize.width,
+               rect.height >= window.minSize.height {
+                window.setFrame(rect, display: false)
+            }
+        }
 
         super.init(window: window)
         window.onPageKeyAction = { [weak self] action in
             switch action {
             case .previous: self?.previousPage(nil)
             case .next: self?.nextPage(nil)
+            case .highlightSelection: self?.highlightSelectionFromKey()
             }
         }
         window.delegate = self
@@ -476,6 +492,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         guard pages.indices.contains(currentPage) else { return }
         let availableWidth = max(120, scrollView.contentSize.width - 48)
         setZoom(availableWidth / pages[currentPage].width)
+    }
+
+    /// Bare-E shortcut: silently no-ops when nothing is selected, unlike
+    /// the menu item which beeps to explain why nothing happened.
+    private func highlightSelectionFromKey() {
+        guard canvasView.pageViews.contains(where: { $0.textSelection != nil }) else { return }
+        highlightSelection(nil)
     }
 
     @objc func highlightSelection(_ sender: Any?) {
@@ -759,7 +782,20 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         }
     }
 
+    private func persistWindowFrame() {
+        guard let window, !window.styleMask.contains(.fullScreen) else { return }
+        UserDefaults.standard.set(
+            NSStringFromRect(window.frame),
+            forKey: ReaderWindowController.windowFrameDefaultsKey
+        )
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        persistWindowFrame()
+    }
+
     func windowDidResize(_ notification: Notification) {
+        persistWindowFrame()
         if !aiSidebar.isHidden {
             applyAISidebarWidth(workspaceLayoutCoordinator.aiWidth)
         }
