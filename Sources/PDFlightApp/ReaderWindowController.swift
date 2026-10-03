@@ -290,6 +290,9 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     /// level (a 8x Retina render of one A4 page is ~500 MB of VRAM).
     private static let maxRenderPixels: Double = 25_000_000
     private static let maxRenderDimension: Double = 8192
+    /// Whether the host window was full screen when the app last quit.
+    /// Windowed frame itself is covered by `setFrameAutosaveName`.
+    static let windowFullScreenDefaultsKey = "reader.windowFullScreen"
     private var tool: ReaderTool = .select
     private var navigationHistory: [DocumentViewportBookmark] = []
     private var loadTask: Task<Void, Never>?
@@ -763,6 +766,14 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         guard !pages.isEmpty else { return }
         canvasView.layoutPages(zoom: zoom, viewportWidth: scrollView.contentSize.width)
         updateVisiblePages()
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        UserDefaults.standard.set(true, forKey: ReaderWindowController.windowFullScreenDefaultsKey)
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        UserDefaults.standard.set(false, forKey: ReaderWindowController.windowFullScreenDefaultsKey)
     }
 
     func windowDidResignKey(_ notification: Notification) {

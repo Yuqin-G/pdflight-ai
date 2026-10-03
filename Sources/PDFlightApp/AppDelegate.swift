@@ -353,6 +353,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 newWindow.makeKeyAndOrderFront(nil)
             } else {
                 reader.showWindow(nil)
+                if UserDefaults.standard.bool(
+                    forKey: ReaderWindowController.windowFullScreenDefaultsKey
+                ), let window = reader.window {
+                    DispatchQueue.main.async {
+                        guard !window.styleMask.contains(.fullScreen) else { return }
+                        window.toggleFullScreen(nil)
+                    }
+                }
             }
         } catch {
             present(error: error, title: "Could not open PDF")
