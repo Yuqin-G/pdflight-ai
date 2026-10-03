@@ -1647,6 +1647,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 let conversationTitle = conversationKey == nil
                     ? nil
                     : await qwenConversationTitle()
+                _ = await LocalWebBridge.shared.ensureReady(for: configuration.baseURL)
                 let stream = aiClient.streamChat(
                     messages: requestMessages,
                     configuration: configuration,

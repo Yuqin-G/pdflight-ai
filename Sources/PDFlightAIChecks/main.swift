@@ -40,6 +40,8 @@ enum PDFlightAIChecks {
         print("PASS: chat content separates Markdown from inline and display LaTeX")
         try markdownParserRecognizesReplyBlocks()
         print("PASS: assistant replies recognize block Markdown")
+        try await localWebBridgeEndpointsAndReadiness()
+        print("PASS: local web bridge resolves loopback endpoints and skips remote providers")
     }
 
     private static func validateRenderableContentFromStandardInput() throws {
@@ -796,6 +798,31 @@ enum PDFlightAIChecks {
             !AIChatRequestBuilder.needsPaperContext(for: .none)
                 && !AIChatRequestBuilder.needsPaperContext(for: .reading),
             "expected every current prompt mode to skip PDF extraction"
+        )
+    }
+
+    private static func localWebBridgeEndpointsAndReadiness() async throws {
+        let bridge = LocalWebBridge()
+        try check(
+            bridge.bridgeEndpoint(from: "https://api.openai.com/v1") == nil,
+            "expected remote provider URLs to skip the local bridge"
+        )
+        let endpoint = try checkNotNil(
+            bridge.bridgeEndpoint(from: "http://127.0.0.1:8199/v1"),
+            "expected a loopback base URL to resolve to a bridge endpoint"
+        )
+        try check(endpoint.port == 8199, "expected the bridge endpoint to keep the configured port")
+        let remoteReady = await bridge.ensureReady(for: "https://api.openai.com/v1")
+        try check(
+            remoteReady,
+            "expected remote providers to count as ready without spawning"
+        )
+        let deadPortReady = await bridge.probe(
+            LocalWebBridge.Endpoint(scheme: "http", host: "127.0.0.1", port: 59999)
+        )
+        try check(
+            deadPortReady == false,
+            "expected probing an unused port to report not-ready"
         )
     }
 

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+*.log
+.env
+config/*.sqlite3
+config/*.sqlite3.bak
+config/app_stats.json
+config/request_history.json
+config/model_name_overrides.local.json
+temp/
+chrome_profile/

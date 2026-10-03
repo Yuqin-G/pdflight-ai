@@ -167,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         readers.forEach { $0.saveReadingPosition() }
         if !isTerminating { saveCurrentSession() }
         isTerminating = true
+        LocalWebBridge.shared.shutdownOwned()
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
