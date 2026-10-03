@@ -1436,40 +1436,33 @@ private final class AIChatMessageView: NSView {
         card.wantsLayer = true
         card.layer?.cornerRadius = 12
         card.layer?.cornerCurve = .continuous
-        card.layer?.borderWidth = 1
-        card.layer?.borderColor = (
-            isUser
-                ? NSColor.controlAccentColor.withAlphaComponent(0.16)
-                : NSColor.separatorColor.withAlphaComponent(0.24)
-        ).cgColor
+        // Coding-agent style: user gets a soft accent bubble, assistant
+        // replies sit directly on the sidebar with no card chrome.
+        card.layer?.borderWidth = 0
         card.layer?.backgroundColor = (
             isUser
-                ? NSColor.controlAccentColor.withAlphaComponent(0.095)
-                : NSColor.textBackgroundColor.withAlphaComponent(0.62)
+                ? NSColor.controlAccentColor.withAlphaComponent(0.11)
+                : NSColor.clear
         ).cgColor
         card.translatesAutoresizingMaskIntoConstraints = false
 
         roleBadge.wantsLayer = true
-        roleBadge.layer?.cornerRadius = 6
-        roleBadge.layer?.backgroundColor = (
-            isUser
-                ? NSColor.controlAccentColor.withAlphaComponent(0.14)
-                : NSColor.controlAccentColor.withAlphaComponent(0.11)
-        ).cgColor
+        roleBadge.layer?.cornerRadius = 5
+        roleBadge.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.10).cgColor
         roleBadge.translatesAutoresizingMaskIntoConstraints = false
 
         roleIcon.image = NSImage(
-            systemSymbolName: isUser ? "person.fill" : "sparkles",
-            accessibilityDescription: isUser ? "You" : "Assistant"
+            systemSymbolName: "sparkles",
+            accessibilityDescription: "Assistant"
         )
         roleIcon.contentTintColor = .controlAccentColor
         roleIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
         roleIcon.translatesAutoresizingMaskIntoConstraints = false
         roleBadge.addSubview(roleIcon)
 
-        roleLabel.stringValue = isUser ? "You" : "Assistant"
-        roleLabel.font = .systemFont(ofSize: 10.5, weight: .semibold)
-        roleLabel.textColor = isUser ? .controlAccentColor : .secondaryLabelColor
+        roleLabel.stringValue = "Assistant"
+        roleLabel.font = .systemFont(ofSize: 10.5, weight: .medium)
+        roleLabel.textColor = .tertiaryLabelColor
         roleLabel.lineBreakMode = .byTruncatingTail
         roleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         roleLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1548,6 +1541,12 @@ private final class AIChatMessageView: NSView {
         contentView.setFontSize(fontSize)
         contentView.translatesAutoresizingMaskIntoConstraints = false
 
+        // User bubbles show no header chrome at all.
+        roleBadge.isHidden = isUser
+        roleLabel.isHidden = isUser
+        timestampLabel.isHidden = isUser
+        copyButton.isHidden = isUser
+
         addSubview(card)
         card.addSubview(roleBadge)
         card.addSubview(roleLabel)
@@ -1583,7 +1582,10 @@ private final class AIChatMessageView: NSView {
             copyButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -7),
             copyButton.widthAnchor.constraint(equalToConstant: 24),
             copyButton.heightAnchor.constraint(equalToConstant: 24),
-            activityPanel.topAnchor.constraint(equalTo: roleBadge.bottomAnchor, constant: 8),
+            activityPanel.topAnchor.constraint(
+                equalTo: isUser ? card.topAnchor : roleBadge.bottomAnchor,
+                constant: isUser ? 4 : 8
+            ),
             activityPanel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
             activityPanel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10),
             activityHeightConstraint,
