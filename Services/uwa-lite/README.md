@@ -9,6 +9,12 @@ PDFlight 随附的精简版 [Universal Web API](https://github.com/lumingya/univ
 - 标签页池、工作流引擎、流式解析器、站点选择器配置
 - 浏览器自动拉起:`9222` 无响应时自动启动带调试端口的 Chrome;0 target 时自动补空白页
 
+瘦身方式:命令引擎、tool calling、Arena 直连模型/图像生成、结果事件桥接等模块以
+`app/services/` 下的同名 stub 替换(全部探测接口返回"未启用"安全默认值),
+`command_engine_actions/_runtime/_results/_storage`、`command_result_store`、
+`tool_calling_parse/_prompts/_validation_retry/_common`、`arena_gpt_image_command`、
+`arena_proxy_rotation`、`restart_guard` 已删除(约 1.5 万行)。
+
 ## 运行
 
 ```sh
@@ -33,4 +39,6 @@ PDFlight 在 AI Base URL 指向 loopback 且端口无响应时会自动拉起本
 
 `config/sites.json` 是从完整版复制的工作流/选择器数据。新增站点按同样格式补充即可;`config/parsers.json` 注册流式解析器。
 
-注意:chat.qwen.ai 需要登录态才有独立的 `/c/<id>` 会话 URL;游客态全部落到 `/c/guest`,会话绑定退化为共享。
+注意:chat.qwen.ai 需要登录态才能稳定开新会话。游客态新开标签页会被重定向到
+`/auth`(无输入框,工作流失败);已有 `/c/guest` 标签页可复用但绑定退化为共享。
+建议在受控 Chrome 里登录一次 Qwen。
