@@ -28,6 +28,17 @@ public enum AIChatMarkdownParser {
                 continue
             }
 
+            if let closingDelimiter = standaloneMathClosingDelimiter(for: trimmed),
+               let closingIndex = lines.indices.dropFirst(index + 1).first(where: {
+                   lines[$0].trimmingCharacters(in: .whitespaces) == closingDelimiter
+               }) {
+                result.append(.paragraph(
+                    lines[index...closingIndex].joined(separator: "\n")
+                ))
+                index = closingIndex + 1
+                continue
+            }
+
             if trimmed.hasPrefix("```") {
                 let language = String(trimmed.dropFirst(3))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -127,6 +138,14 @@ public enum AIChatMarkdownParser {
             result.append(.paragraph(paragraphLines.joined(separator: "\n")))
         }
         return result
+    }
+
+    private static func standaloneMathClosingDelimiter(for line: String) -> String? {
+        switch line {
+        case "$$": "$$"
+        case "\\[": "\\]"
+        default: nil
+        }
     }
 
     private static func startsBlock(_ trimmed: String, line: String, nextLine: String?) -> Bool {

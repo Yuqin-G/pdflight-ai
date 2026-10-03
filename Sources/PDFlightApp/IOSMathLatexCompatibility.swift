@@ -21,6 +21,22 @@ enum IOSMathLatexCompatibility {
         }
 
         output += latex[cursor...]
+        return replacingCommand(named: "dots", with: "ldots", in: output)
+    }
+
+    private static func replacingCommand(
+        named name: String,
+        with replacement: String,
+        in latex: String
+    ) -> String {
+        var output = ""
+        var cursor = latex.startIndex
+        while let range = nextCommand(named: name, in: latex, after: cursor) {
+            output += latex[cursor..<range.lowerBound]
+            output += "\\\(replacement)"
+            cursor = range.upperBound
+        }
+        output += latex[cursor...]
         return output
     }
 

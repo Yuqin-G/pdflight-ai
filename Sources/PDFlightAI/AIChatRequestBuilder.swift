@@ -7,6 +7,22 @@ public enum AIChatRequestBuilder {
         false
     }
 
+    /// Resolves the visible user turn without turning an attachment into a
+    /// hidden instruction. Prompt modes remain independent system messages.
+    public static func displayQuestion(
+        question: String,
+        template: AIPromptTemplate,
+        hasImageAttachments: Bool,
+        includeCurrentPDF: Bool
+    ) -> String? {
+        if let displayQuestion = template.displayQuestion(for: question) {
+            return displayQuestion
+        }
+        if includeCurrentPDF { return "Attached PDF" }
+        if hasImageAttachments { return "Attached image" }
+        return nil
+    }
+
     public static func messages(
         preset: AIPromptPreset,
         title: String,

@@ -221,9 +221,25 @@ private final class AIHistoryMenuSelection: NSObject {
     }
 }
 
+enum ReaderSidebarResizePhase {
+    case live
+    case ended
+}
+
+enum ReaderSidebarResizeWorkPolicy {
+    static func persistsSharedWidth(during phase: ReaderSidebarResizePhase) -> Bool {
+        phase == .ended
+    }
+
+    static func relayoutsDocument(during phase: ReaderSidebarResizePhase) -> Bool {
+        phase == .ended
+    }
+}
+
 @MainActor
 final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageViewDelegate, NSSplitViewDelegate {
     var onClose: (() -> Void)?
+    var onActivate: (() -> Void)?
     var onNavigateAIHistory: ((URL, String) -> Void)?
     var onOpenPaperFromLibrary: ((URL) -> Void)?
 
@@ -295,6 +311,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private var splitResizeAnchor: DocumentViewportZoomAnchor?
     private var isApplyingAISidebarLayout = false
     private var aiSidebarWidthConstraint: NSLayoutConstraint?
+    private var isResizingAISidebar = false
+    private var aiSidebarResizeAnchor: DocumentViewportZoomAnchor?
     private weak var activeSelectionPageView: PageView?
 
     init(
@@ -734,6 +752,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        onActivate?()
         navigationSidebar.reloadLibrary()
         suspensionTask?.cancel()
         suspensionTask = nil
@@ -931,8 +950,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         navigationSidebar.translatesAutoresizingMaskIntoConstraints = false
         navigationSidebar.isHidden = false
         outlineButton.state = .on
-        aiSidebar.onSend = { [weak self] question, attachments, preset in
-            self?.submitAIMessage(question, attachments: attachments, preset: preset)
+        aiSidebar.onSend = { [weak self] question, attachments, preset, includeCurrentPDF in
+            self?.submitAIMessage(
+                question,
+                attachments: attachments,
+                preset: preset,
+                includeCurrentPDF: includeCurrentPDF
+            )
         }
         aiSidebar.onConfigure = { [weak self] in
             self?.configureAI(nil)
@@ -957,6 +981,9 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiSidebar.onShowHistory = { [weak self] _ in
             self?.showAIHistoryMenu()
         }
+        aiSidebar.onRevealCurrentHistory = { [weak self] in
+            self?.revealCurrentAIHistoryFile()
+        }
         aiSidebar.onPresetChange = { [weak self] preset in
             self?.updateAIConversationPreset(preset)
         }
@@ -971,6 +998,9 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         }
         aiSidebar.onResizeBy = { [weak self] delta in
             self?.resizeAISidebar(by: delta)
+        }
+        aiSidebar.onResizeEnded = { [weak self] in
+            self?.finishResizingAISidebar()
         }
         aiSidebar.isHidden = true
         aiSidebar.setPaperTitle(paperTitle)
@@ -1361,14 +1391,31 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
 
     private func resizeAISidebar(by delta: CGFloat) {
         guard !aiSidebar.isHidden else { return }
-        let anchor = currentZoomAnchor()
-        workspaceLayoutCoordinator.setAIWidth(
-            aiSidebar.frame.width - delta,
-            source: self
-        )
-        applyAISidebarWidth(workspaceLayoutCoordinator.aiWidth)
+        if !isResizingAISidebar {
+            isResizingAISidebar = true
+            aiSidebarResizeAnchor = currentZoomAnchor()
+        }
+        isApplyingAISidebarLayout = true
+        applyAISidebarWidth(aiSidebar.frame.width - delta)
         window?.contentView?.layoutSubtreeIfNeeded()
-        guard !pages.isEmpty else { return }
+        isApplyingAISidebarLayout = false
+    }
+
+    private func finishResizingAISidebar() {
+        guard isResizingAISidebar else { return }
+        isResizingAISidebar = false
+        let anchor = aiSidebarResizeAnchor
+        aiSidebarResizeAnchor = nil
+        let finalWidth = aiSidebarWidthConstraint?.constant ?? aiSidebar.frame.width
+        if ReaderSidebarResizeWorkPolicy.persistsSharedWidth(during: .ended) {
+            workspaceLayoutCoordinator.setAIWidth(finalWidth, source: self)
+        }
+        isApplyingAISidebarLayout = true
+        applyAISidebarWidth(finalWidth)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        isApplyingAISidebarLayout = false
+        guard ReaderSidebarResizeWorkPolicy.relayoutsDocument(during: .ended),
+              !pages.isEmpty else { return }
         canvasView.layoutPages(zoom: zoom, viewportWidth: scrollView.contentSize.width)
         restoreCurrentViewportCenter(from: anchor)
         updateVisiblePages()
@@ -1450,12 +1497,14 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private func submitAIMessage(
         _ question: String,
         attachments: [AIChatImageAttachment] = [],
-        preset: AIPromptPreset
+        preset: AIPromptPreset,
+        includeCurrentPDF: Bool = false
     ) {
         let submission = AIChatSubmission(
             question: question,
             imageAttachments: attachments,
-            promptPreset: preset
+            promptPreset: preset,
+            includeCurrentPDF: includeCurrentPDF
         )
         guard aiTask == nil, aiHistoryLoaded else {
             aiSubmissionQueue.enqueue(submission)
@@ -1495,10 +1544,15 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let question = submission.question
         let attachments = submission.imageAttachments
         let preset = submission.promptPreset
+        let includeCurrentPDF = submission.includeCurrentPDF
 
         let configuration = aiConfigurationStore.configuration()
         guard !configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            aiSidebar.prefill(question, attachments: attachments)
+            aiSidebar.prefill(
+                question,
+                attachments: attachments,
+                includeCurrentPDF: includeCurrentPDF
+            )
             if showAISettings() {
                 startAIMessage(submission)
             } else {
@@ -1511,17 +1565,22 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         do {
             apiKey = try aiConfigurationStore.apiKey()
         } catch {
-            aiSidebar.prefill(question, attachments: attachments)
+            aiSidebar.prefill(
+                question,
+                attachments: attachments,
+                includeCurrentPDF: includeCurrentPDF
+            )
             present(error: error, title: "Could not read AI settings")
             return
         }
 
         let promptTemplate = promptTemplate(for: preset)
-        let normalizedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !attachments.isEmpty
-            ? "Please analyze the attached image."
-            : question
-        guard let displayQuestion = promptTemplate.displayQuestion(for: normalizedQuestion) else { return }
+        guard let displayQuestion = AIChatRequestBuilder.displayQuestion(
+            question: question,
+            template: promptTemplate,
+            hasImageAttachments: !attachments.isEmpty,
+            includeCurrentPDF: includeCurrentPDF
+        ) else { return }
         if let index = activeAIConversationIndex {
             aiHistory?.conversations[index].promptPreset = preset
             if aiMessages.isEmpty,
@@ -1546,7 +1605,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let providerIdentity = aiProviderIdentity(for: configuration)
         aiSidebar.append(placeholder)
         aiSidebar.setStreaming(true)
-        aiSidebar.setActivity(.preparing, detail: configuration.model)
+        aiSidebar.setActivity(
+            includeCurrentPDF ? .uploading : .preparing,
+            detail: includeCurrentPDF ? documentURL.lastPathComponent : configuration.model
+        )
         aiSidebar.setMessageActivity(
             id: placeholder.id,
             phase: .preparing,
@@ -1590,9 +1652,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     configuration: configuration,
                     apiKey: apiKey,
                     conversationKey: conversationKey,
-                    conversationTitle: conversationTitle
+                    conversationTitle: conversationTitle,
+                    currentPDFURL: includeCurrentPDF ? documentURL : nil
                 )
-                aiSidebar.setActivity(.waiting, detail: configuration.model)
+                if !includeCurrentPDF {
+                    aiSidebar.setActivity(.waiting, detail: configuration.model)
+                }
                 aiSidebar.setMessageActivity(
                     id: placeholder.id,
                     phase: .waiting,
@@ -2102,6 +2167,36 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let directory = aiChatHistoryStore.storageDirectoryURL
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         NSWorkspace.shared.open(directory)
+    }
+
+    private func revealCurrentAIHistoryFile() {
+        guard let index = activeAIConversationIndex else {
+            aiSidebar.setActivity(.failed, detail: "No conversation is available for this paper")
+            return
+        }
+        aiHistory?.conversations[index].messages = aiMessages
+        if let latest = aiMessages.last?.createdAt {
+            aiHistory?.conversations[index].updatedAt = latest
+        }
+        guard let snapshot = aiHistory else {
+            aiSidebar.setActivity(.failed, detail: "No conversation is available for this paper")
+            return
+        }
+
+        let historyFileURL = aiChatHistoryStore.fileURL(for: documentURL)
+        aiHistorySaveTask?.cancel()
+        aiHistorySaveTask = Task { [weak self, aiChatHistoryStore, documentURL] in
+            do {
+                try await aiChatHistoryStore.save(snapshot, for: documentURL)
+                guard !Task.isCancelled else { return }
+                NSWorkspace.shared.activateFileViewerSelecting([historyFileURL])
+                self?.aiSidebar.setActivity(.ready, detail: "Showing this paper's portable chat JSON")
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.aiSidebar.setActivity(.failed, detail: error.localizedDescription)
+            }
+            self?.aiHistorySaveTask = nil
+        }
     }
 
     @objc private func aiReplyGestureZoomPreferenceChanged(_ notification: Notification) {

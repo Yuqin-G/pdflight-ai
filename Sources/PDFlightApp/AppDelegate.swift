@@ -333,6 +333,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.readers.removeAll { $0 === reader }
                 if !self.isTerminating { self.saveCurrentSession() }
             }
+            reader.onActivate = { [weak self] in
+                guard let self, !isTerminating else { return }
+                saveCurrentSession()
+            }
             reader.onNavigateAIHistory = { [weak self] URL, conversationID in
                 self?.open(URL, selectingAIConversation: conversationID)
             }
@@ -375,16 +379,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func saveCurrentSession() {
-        try? readerSessionStore.save(documentURLs: readers.map(\.documentURL))
+        try? readerSessionStore.save(
+            documentURLs: readers.map(\.documentURL),
+            activeDocumentURL: keyReader?.documentURL
+        )
     }
 
     private func restoreLastSessionIfEnabled() -> Bool {
         guard ReaderSessionRestorePreference.isEnabled() else { return false }
-        let URLs = ((try? readerSessionStore.documentURLs()) ?? []).filter {
+        let state = (try? readerSessionStore.state())
+            ?? ReaderSessionState(documentURLs: [], activeDocumentURL: nil)
+        let URLs = state.documentURLs.filter {
             FileManager.default.fileExists(atPath: $0.path)
         }
         guard !URLs.isEmpty else { return false }
         URLs.forEach(open)
+        if let activeURL = state.activeDocumentURL,
+           let activeReader = readers.first(where: {
+               $0.documentURL.standardizedFileURL == activeURL.standardizedFileURL
+           }) {
+            activeReader.window?.makeKeyAndOrderFront(nil)
+            saveCurrentSession()
+        }
         return true
     }
 

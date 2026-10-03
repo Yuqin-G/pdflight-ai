@@ -8,7 +8,8 @@ public struct OpenAICompatibleClient: Sendable {
         configuration: AIProviderConfiguration,
         apiKey: String,
         conversationKey: String? = nil,
-        conversationTitle: String? = nil
+        conversationTitle: String? = nil,
+        currentPDFURL: URL? = nil
     ) -> AsyncThrowingStream<OpenAIStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -18,7 +19,8 @@ public struct OpenAICompatibleClient: Sendable {
                         configuration: configuration,
                         apiKey: apiKey,
                         conversationKey: conversationKey,
-                        conversationTitle: conversationTitle
+                        conversationTitle: conversationTitle,
+                        currentPDFURL: currentPDFURL
                     )
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else {
@@ -65,13 +67,22 @@ public struct OpenAICompatibleClient: Sendable {
         configuration: AIProviderConfiguration,
         apiKey: String,
         conversationKey: String? = nil,
-        conversationTitle: String? = nil
+        conversationTitle: String? = nil,
+        currentPDFURL: URL? = nil
     ) throws -> URLRequest {
         let model = configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
             throw OpenAICompatibleError.invalidConfiguration("Enter a model in AI Settings.")
         }
         let endpoint = try endpointURL(from: configuration.baseURL)
+        if currentPDFURL != nil {
+            let host = endpoint.host?.lowercased() ?? ""
+            guard host == "localhost" || host == "127.0.0.1" || host == "::1" else {
+                throw OpenAICompatibleError.invalidConfiguration(
+                    "Local PDF attachment is available only with a localhost AI service."
+                )
+            }
+        }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = 300
@@ -86,7 +97,14 @@ public struct OpenAICompatibleClient: Sendable {
             messages: messages.map(RequestMessage.init),
             stream: true,
             conversationKey: conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines),
-            conversationTitle: conversationTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+            conversationTitle: conversationTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+            pdfAttachments: currentPDFURL.map {
+                [RequestPDFAttachment(
+                    path: $0.standardizedFileURL.path,
+                    name: $0.lastPathComponent,
+                    mimeType: "application/pdf"
+                )]
+            }
         ))
         return request
     }
@@ -132,6 +150,7 @@ private struct RequestBody: Encodable {
     let stream: Bool
     let conversationKey: String?
     let conversationTitle: String?
+    let pdfAttachments: [RequestPDFAttachment]?
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -139,6 +158,18 @@ private struct RequestBody: Encodable {
         case stream
         case conversationKey = "conversation_key"
         case conversationTitle = "conversation_title"
+        case pdfAttachments = "pdf_attachments"
+    }
+}
+
+private struct RequestPDFAttachment: Encodable {
+    let path: String
+    let name: String
+    let mimeType: String
+
+    enum CodingKeys: String, CodingKey {
+        case path, name
+        case mimeType = "mime_type"
     }
 }
 

@@ -36,6 +36,7 @@ enum AIChatActivityPhase: Equatable {
     case ready
     case loading
     case preparing
+    case uploading
     case waiting
     case thinking
     case answering
@@ -48,6 +49,7 @@ enum AIChatActivityPhase: Equatable {
         case .ready: "Ready"
         case .loading: "Loading"
         case .preparing: "Preparing request"
+        case .uploading: "Uploading PDF"
         case .waiting: "Waiting for model"
         case .thinking: "Thinking"
         case .answering: "Writing answer"
@@ -59,7 +61,7 @@ enum AIChatActivityPhase: Equatable {
 
     fileprivate var isActive: Bool {
         switch self {
-        case .loading, .preparing, .waiting, .thinking, .answering: true
+        case .loading, .preparing, .uploading, .waiting, .thinking, .answering: true
         case .ready, .completed, .stopped, .failed: false
         }
     }
@@ -67,7 +69,7 @@ enum AIChatActivityPhase: Equatable {
     fileprivate var color: NSColor {
         switch self {
         case .ready, .completed: .systemGreen
-        case .loading, .preparing, .waiting, .answering: .controlAccentColor
+        case .loading, .preparing, .uploading, .waiting, .answering: .controlAccentColor
         case .thinking: .systemOrange
         case .stopped: .secondaryLabelColor
         case .failed: .systemRed
@@ -77,7 +79,7 @@ enum AIChatActivityPhase: Equatable {
 
 @MainActor
 final class AIChatSidebarView: NSView {
-    var onSend: ((String, [AIChatImageAttachment], AIPromptPreset) -> Void)?
+    var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool) -> Void)?
     var onConfigure: (() -> Void)?
     var onNewConversation: (() -> Void)?
     var onSelectConversation: ((String) -> Void)?
@@ -85,17 +87,20 @@ final class AIChatSidebarView: NSView {
     var onDeleteMessage: ((String) -> Void)?
     var onRemoveQueuedSubmission: ((String) -> Void)?
     var onShowHistory: ((NSButton) -> Void)?
+    var onRevealCurrentHistory: (() -> Void)?
     var onPresetChange: ((AIPromptPreset) -> Void)?
     var onEditPromptTemplate: ((AIPromptPreset) -> Void)?
     var onAddPromptTemplate: (() -> Void)?
     var onCancel: (() -> Void)?
     var onResizeBy: ((CGFloat) -> Void)?
+    var onResizeEnded: (() -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "Ask PDF")
     private let paperLabel = NSTextField(labelWithString: "")
     private let conversationScrollView = NSScrollView()
     private let conversationStack = NSStackView()
     private let historyButton = NSButton()
+    private let currentHistoryButton = NSButton()
     private let newConversationButton = NSButton()
     private let deleteConversationButton = NSButton()
     private let decreaseFontButton = NSButton()
@@ -115,6 +120,7 @@ final class AIChatSidebarView: NSView {
     private let promptModeScrollView = NSScrollView()
     private let promptModeStack = NSStackView()
     private let promptManageButton = NSButton()
+    private let attachPDFButton = NSButton()
     private let attachImageButton = NSButton()
     private let sendButton = NSButton()
     private let cancelButton = NSButton()
@@ -241,6 +247,7 @@ final class AIChatSidebarView: NSView {
         } else {
             messages.forEach(append)
         }
+        setCurrentPDFAttachmentSelected(false)
         scrollToBottom()
     }
 
@@ -302,6 +309,7 @@ final class AIChatSidebarView: NSView {
         composer.isEditable = true
         promptButtons.values.forEach { $0.isEnabled = true }
         promptManageButton.isEnabled = true
+        attachPDFButton.isEnabled = true
         attachImageButton.isEnabled = true
         conversationButtons.values.forEach { $0.isEnabled = !streaming }
         newConversationButton.isEnabled = !streaming
@@ -332,12 +340,19 @@ final class AIChatSidebarView: NSView {
         needsLayout = true
     }
 
-    func prefill(_ text: String, attachments: [AIChatImageAttachment] = []) {
+    func prefill(
+        _ text: String,
+        attachments: [AIChatImageAttachment] = [],
+        includeCurrentPDF: Bool = false
+    ) {
         guard composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         composer.string = text
         if composerAttachments.isEmpty, !attachments.isEmpty {
             composerAttachments = Array(attachments.prefix(4))
             rebuildComposerAttachments()
+        }
+        if includeCurrentPDF {
+            setCurrentPDFAttachmentSelected(true)
         }
         composer.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         composer.needsDisplay = true
@@ -411,6 +426,10 @@ final class AIChatSidebarView: NSView {
         messageViews[id]?.renderedMathLatexForLayoutCheck() ?? []
     }
 
+    func messageTimestampForLayoutCheck(id: String) -> String {
+        messageViews[id]?.timestampForLayoutCheck() ?? ""
+    }
+
     func hasScrollableDisplayMathForLayoutCheck(id: String) -> Bool {
         messageViews[id]?.hasScrollableDisplayMathForLayoutCheck() ?? false
     }
@@ -447,6 +466,26 @@ final class AIChatSidebarView: NSView {
         composer.font?.pointSize ?? 0
     }
 
+    func currentPDFAttachmentIsVisuallyEmphasizedForLayoutCheck() -> Bool {
+        attachPDFButton.state == .on
+            && attachPDFButton.title == "PDF"
+            && attachPDFButton.contentTintColor?.isEqual(NSColor.controlAccentColor) == true
+            && attachPDFButton.layer?.borderWidth == 1
+            && attachPDFButton.layer?.backgroundColor != nil
+    }
+
+    func setCurrentPDFAttachmentSelectedForLayoutCheck(_ selected: Bool) {
+        setCurrentPDFAttachmentSelected(selected)
+    }
+
+    func currentPDFAttachmentSelectedForLayoutCheck() -> Bool {
+        attachPDFButton.state == .on
+    }
+
+    func triggerPromptPresetForLayoutCheck(_ preset: AIPromptPreset) {
+        promptButtons[preset.rawValue]?.performClick(nil)
+    }
+
     func clearComposer() {
         composer.string = ""
         composerAttachments.removeAll()
@@ -460,6 +499,14 @@ final class AIChatSidebarView: NSView {
 
     func composerImageAttachmentCountForLayoutCheck() -> Int {
         composerAttachments.count
+    }
+
+    func pasteImageFromKeyboardForLayoutCheck(_ pasteboard: NSPasteboard) -> Bool {
+        composer.performPasteKeyEquivalentForLayoutCheck(from: pasteboard)
+    }
+
+    func triggerRevealCurrentHistoryForLayoutCheck() {
+        revealCurrentHistoryPressed(nil)
     }
 
     func composerAcceptsQueuedInputForLayoutCheck() -> Bool {
@@ -521,6 +568,7 @@ final class AIChatSidebarView: NSView {
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         translatesAutoresizingMaskIntoConstraints = false
         resizeHandle.onDrag = { [weak self] delta in self?.onResizeBy?(delta) }
+        resizeHandle.onDragEnded = { [weak self] in self?.onResizeEnded?() }
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
         resizeHandle.setAccessibilityElement(true)
         resizeHandle.setAccessibilityRole(.splitter)
@@ -538,6 +586,12 @@ final class AIChatSidebarView: NSView {
 
         configureIconButton(historyButton, symbol: "clock.arrow.circlepath", tooltip: "Chat history")
         historyButton.action = #selector(historyPressed(_:))
+        configureIconButton(
+            currentHistoryButton,
+            symbol: "doc.text.magnifyingglass",
+            tooltip: "Show this paper's chat file in Finder"
+        )
+        currentHistoryButton.action = #selector(revealCurrentHistoryPressed(_:))
         configureIconButton(newConversationButton, symbol: "plus", tooltip: "New conversation")
         newConversationButton.action = #selector(newConversationPressed(_:))
         newConversationButton.controlSize = .small
@@ -558,6 +612,7 @@ final class AIChatSidebarView: NSView {
             decreaseFontButton,
             increaseFontButton,
             historyButton,
+            currentHistoryButton,
             settingsButton
         ])
         header.orientation = .horizontal
@@ -657,6 +712,22 @@ final class AIChatSidebarView: NSView {
         configureComposerAction(attachImageButton, symbol: "photo.badge.plus", tooltip: "Attach images")
         attachImageButton.action = #selector(attachImagePressed(_:))
 
+        configureComposerAction(
+            attachPDFButton,
+            symbol: "doc.badge.plus",
+            tooltip: "Attach the current PDF to the next message"
+        )
+        attachPDFButton.title = "PDF"
+        attachPDFButton.imagePosition = .imageLeading
+        attachPDFButton.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        attachPDFButton.isBordered = false
+        attachPDFButton.wantsLayer = true
+        attachPDFButton.layer?.cornerRadius = 6
+        attachPDFButton.layer?.cornerCurve = .continuous
+        attachPDFButton.setButtonType(.toggle)
+        attachPDFButton.action = #selector(attachPDFPressed(_:))
+        setCurrentPDFAttachmentSelected(false)
+
         configureHorizontalStrip(scrollView: promptModeScrollView, stack: promptModeStack)
         promptModeScrollView.toolTip = "Prompt modes"
         promptModeScrollView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -674,6 +745,7 @@ final class AIChatSidebarView: NSView {
         let composerActions = NSStackView(views: [
             promptModeScrollView,
             promptManageButton,
+            attachPDFButton,
             attachImageButton,
             cancelButton,
             sendButton
@@ -866,11 +938,45 @@ final class AIChatSidebarView: NSView {
     private func submitComposer() {
         let text = composer.string.trimmingCharacters(in: .whitespacesAndNewlines)
         let preset = selectedPreset()
-        guard (!composerAttachments.isEmpty || selectedPromptTemplate().displayQuestion(for: text) != nil),
+        let includeCurrentPDF = attachPDFButton.state == .on
+        guard AIChatRequestBuilder.displayQuestion(
+            question: text,
+            template: selectedPromptTemplate(),
+            hasImageAttachments: !composerAttachments.isEmpty,
+            includeCurrentPDF: includeCurrentPDF
+        ) != nil,
               composer.isEditable else { return }
         let attachments = composerAttachments
         clearComposer()
-        onSend?(text, attachments, preset)
+        setCurrentPDFAttachmentSelected(false)
+        onSend?(text, attachments, preset, includeCurrentPDF)
+    }
+
+    private func setCurrentPDFAttachmentSelected(_ selected: Bool) {
+        attachPDFButton.state = selected ? .on : .off
+        let foreground: NSColor = selected ? .controlAccentColor : .secondaryLabelColor
+        attachPDFButton.bezelColor = nil
+        attachPDFButton.contentTintColor = foreground
+        attachPDFButton.attributedTitle = NSAttributedString(
+            string: "PDF",
+            attributes: [
+                .font: attachPDFButton.font
+                    ?? NSFont.systemFont(ofSize: 10.5, weight: .semibold),
+                .foregroundColor: foreground
+            ]
+        )
+        attachPDFButton.layer?.backgroundColor = (
+            selected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.13)
+                : NSColor.clear
+        ).cgColor
+        attachPDFButton.layer?.borderWidth = selected ? 1 : 0
+        attachPDFButton.layer?.borderColor = NSColor.controlAccentColor
+            .withAlphaComponent(0.16).cgColor
+        attachPDFButton.toolTip = selected
+            ? "Current PDF will be uploaded with the next message"
+            : "Attach the current PDF to the next message"
+        attachPDFButton.setAccessibilityValue(selected ? "Selected" : "Not selected")
     }
 
     private func addImages(from pasteboard: NSPasteboard) -> Bool {
@@ -880,6 +986,20 @@ final class AIChatSidebarView: NSView {
         for URL in URLs where UTType(filenameExtension: URL.pathExtension)?.conforms(to: .image) == true {
             if let image = NSImage(contentsOf: URL) {
                 images.append((image, URL.lastPathComponent))
+            }
+        }
+        if images.isEmpty {
+            let encodedTypes: [(NSPasteboard.PasteboardType, String)] = [
+                (.png, "Pasted image.png"),
+                (.tiff, "Pasted image.tiff"),
+                (NSPasteboard.PasteboardType("public.jpeg"), "Pasted image.jpg"),
+                (NSPasteboard.PasteboardType("public.heic"), "Pasted image.heic")
+            ]
+            for (type, fileName) in encodedTypes {
+                guard let data = pasteboard.data(forType: type),
+                      let image = NSImage(data: data) else { continue }
+                images.append((image, fileName))
+                break
             }
         }
         if images.isEmpty, let image = NSImage(pasteboard: pasteboard) {
@@ -995,7 +1115,7 @@ final class AIChatSidebarView: NSView {
         let title = NSTextField(labelWithString: "Read this paper with AI")
         title.font = .systemFont(ofSize: 15, weight: .medium)
         title.textColor = .labelColor
-        let detail = NSTextField(wrappingLabelWithString: "No hidden prompt or PDF pages are sent. Choose Reading only when you want the saved analysis prompt.")
+        let detail = NSTextField(wrappingLabelWithString: "No hidden prompt or PDF pages are sent unless you select them. Use the PDF button to upload this paper once.")
         detail.font = .systemFont(ofSize: 12)
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
@@ -1032,6 +1152,12 @@ final class AIChatSidebarView: NSView {
     }
 
     @objc private func sendPressed(_ sender: Any?) { submitComposer() }
+    @objc private func attachPDFPressed(_ sender: NSButton) {
+        setCurrentPDFAttachmentSelected(sender.state == .on)
+        setStatus(sender.state == .on
+            ? "Current PDF will be uploaded once with the next message"
+            : "Current PDF attachment is off")
+    }
     @objc private func attachImagePressed(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.title = "Attach images"
@@ -1052,6 +1178,7 @@ final class AIChatSidebarView: NSView {
     @objc private func newConversationPressed(_ sender: Any?) { onNewConversation?() }
     @objc private func deleteConversationPressed(_ sender: Any?) { onDeleteConversation?() }
     @objc private func historyPressed(_ sender: NSButton) { onShowHistory?(sender) }
+    @objc private func revealCurrentHistoryPressed(_ sender: Any?) { onRevealCurrentHistory?() }
 
     @objc private func decreaseFontPressed(_ sender: Any?) {
         changeMessageFontSize(by: -1)
@@ -1112,6 +1239,12 @@ final class AIChatSidebarView: NSView {
 @MainActor
 private final class AIChatMessageStackView: NSStackView {
     override var isFlipped: Bool { true }
+}
+
+enum AIChatNestedScrollRouting {
+    static func sendsToOuterVerticalScroll(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
+        abs(deltaY) > 0.01 && abs(deltaY) >= abs(deltaX)
+    }
 }
 
 @MainActor
@@ -1215,6 +1348,7 @@ private final class AIChatSelectionButton: NSButton {
 @MainActor
 private final class AISidebarResizeHandle: NSView {
     var onDrag: ((CGFloat) -> Void)?
+    var onDragEnded: (() -> Void)?
     private var previousWindowX: CGFloat?
 
     override func resetCursorRects() {
@@ -1229,15 +1363,20 @@ private final class AISidebarResizeHandle: NSView {
 
     override func mouseDown(with event: NSEvent) {
         previousWindowX = event.locationInWindow.x
-        guard let window else { return }
-        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-            if next.type == .leftMouseUp { break }
-            guard let previousWindowX else { break }
-            let currentX = next.locationInWindow.x
-            self.previousWindowX = currentX
-            onDrag?(currentX - previousWindowX)
-        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let previousWindowX else { return }
+        let currentX = event.locationInWindow.x
+        self.previousWindowX = currentX
+        onDrag?(currentX - previousWindowX)
+    }
+
+    override func mouseUp(with event: NSEvent) {
         previousWindowX = nil
+        onDragEnded?()
+        super.mouseUp(with: event)
     }
 }
 
@@ -1258,9 +1397,17 @@ private final class AIActivityDotView: NSView {
 private final class AIChatMessageView: NSView {
     var onDelete: (() -> Void)?
 
+    private static let compactBeijingFormatter = makeBeijingFormatter(
+        dateFormat: "MM-dd HH:mm"
+    )
+    private static let detailedBeijingFormatter = makeBeijingFormatter(
+        dateFormat: "yyyy-MM-dd HH:mm:ss '北京时间'"
+    )
+
     private let roleBadge = NSView()
     private let roleIcon = NSImageView()
     private let roleLabel = NSTextField(labelWithString: "")
+    private let timestampLabel = NSTextField(labelWithString: "")
     private let copyButton = NSButton()
     private let bottomCopyButton = NSButton()
     private let deleteMessageButton = NSButton()
@@ -1321,7 +1468,19 @@ private final class AIChatMessageView: NSView {
         roleLabel.font = .systemFont(ofSize: 10.5, weight: .semibold)
         roleLabel.textColor = isUser ? .controlAccentColor : .secondaryLabelColor
         roleLabel.lineBreakMode = .byTruncatingTail
+        roleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         roleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        timestampLabel.stringValue = isAssistant ? Self.beijingTimestamp(message.createdAt) : ""
+        timestampLabel.font = .monospacedDigitSystemFont(ofSize: 9.5, weight: .regular)
+        timestampLabel.textColor = .tertiaryLabelColor
+        timestampLabel.toolTip = isAssistant
+            ? Self.beijingTimestamp(message.createdAt, includeYearAndSeconds: true)
+            : nil
+        timestampLabel.isHidden = !isAssistant
+        timestampLabel.setContentHuggingPriority(.required, for: .horizontal)
+        timestampLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        timestampLabel.translatesAutoresizingMaskIntoConstraints = false
 
         copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy message")
         copyButton.bezelStyle = .texturedRounded
@@ -1389,6 +1548,7 @@ private final class AIChatMessageView: NSView {
         addSubview(card)
         card.addSubview(roleBadge)
         card.addSubview(roleLabel)
+        card.addSubview(timestampLabel)
         card.addSubview(copyButton)
         card.addSubview(activityPanel)
         card.addSubview(contentView)
@@ -1410,7 +1570,9 @@ private final class AIChatMessageView: NSView {
             roleIcon.heightAnchor.constraint(equalToConstant: 11),
             roleLabel.centerYAnchor.constraint(equalTo: roleBadge.centerYAnchor),
             roleLabel.leadingAnchor.constraint(equalTo: roleBadge.trailingAnchor, constant: 7),
-            roleLabel.trailingAnchor.constraint(lessThanOrEqualTo: copyButton.leadingAnchor, constant: -7),
+            timestampLabel.centerYAnchor.constraint(equalTo: roleBadge.centerYAnchor),
+            timestampLabel.leadingAnchor.constraint(equalTo: roleLabel.trailingAnchor, constant: 7),
+            timestampLabel.trailingAnchor.constraint(lessThanOrEqualTo: copyButton.leadingAnchor, constant: -7),
             copyButton.centerYAnchor.constraint(equalTo: roleBadge.centerYAnchor),
             copyButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -7),
             copyButton.widthAnchor.constraint(equalToConstant: 24),
@@ -1441,6 +1603,25 @@ private final class AIChatMessageView: NSView {
         ])
         contentView.setImageAttachments(message.imageAttachments)
         setContent(message.content, renderMarkdown: message.role == .assistant)
+    }
+
+    private static func beijingTimestamp(
+        _ date: Date,
+        includeYearAndSeconds: Bool = false
+    ) -> String {
+        let formatter = includeYearAndSeconds
+            ? detailedBeijingFormatter
+            : compactBeijingFormatter
+        return formatter.string(from: date)
+    }
+
+    private static func makeBeijingFormatter(dateFormat: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = dateFormat
+        return formatter
     }
 
     @available(*, unavailable)
@@ -1479,6 +1660,10 @@ private final class AIChatMessageView: NSView {
 
     func renderedMathLatexForLayoutCheck() -> [String] {
         contentView.renderedMathLatexForLayoutCheck()
+    }
+
+    func timestampForLayoutCheck() -> String {
+        timestampLabel.stringValue
     }
 
     func hasScrollableDisplayMathForLayoutCheck() -> Bool {
@@ -2142,10 +2327,12 @@ private final class AIChatRenderedContentView: NSStackView {
 @MainActor
 private final class AIChatDisplayMathScrollView: NSScrollView {
     private let mathLabel: MTMathUILabel
+    private let formulaSize: NSSize
     private let mathDocument = NSView()
 
     init(mathLabel: MTMathUILabel) {
         self.mathLabel = mathLabel
+        formulaSize = mathLabel.intrinsicContentSize
         super.init(frame: .zero)
         borderType = .noBorder
         drawsBackground = false
@@ -2166,9 +2353,19 @@ private final class AIChatDisplayMathScrollView: NSScrollView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func scrollWheel(with event: NSEvent) {
+        if AIChatNestedScrollRouting.sendsToOuterVerticalScroll(
+            deltaX: event.scrollingDeltaX,
+            deltaY: event.scrollingDeltaY
+        ), let outerVerticalScrollView {
+            outerVerticalScrollView.scrollWheel(with: event)
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+
     override func layout() {
         super.layout()
-        let formulaSize = mathLabel.intrinsicContentSize
         let viewportSize = contentView.bounds.size
         let documentWidth = max(viewportSize.width, ceil(formulaSize.width) + 16)
         let documentHeight = max(viewportSize.height, ceil(formulaSize.height) + 8)
@@ -2184,6 +2381,19 @@ private final class AIChatDisplayMathScrollView: NSScrollView {
             width: ceil(formulaSize.width),
             height: ceil(formulaSize.height)
         )
+    }
+
+    private var outerVerticalScrollView: NSScrollView? {
+        var ancestor = superview
+        while let view = ancestor {
+            if let scrollView = view as? NSScrollView,
+               scrollView !== self,
+               scrollView.hasVerticalScroller {
+                return scrollView
+            }
+            ancestor = view.superview
+        }
+        return nil
     }
 }
 
@@ -2216,16 +2426,19 @@ private final class AIQueuedSubmissionView: NSView {
 
         let trimmedQuestion = submission.question
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let question = trimmedQuestion.isEmpty ? "Image message" : trimmedQuestion
+        let question = trimmedQuestion.isEmpty
+            ? (submission.includeCurrentPDF ? "PDF message" : "Image message")
+            : trimmedQuestion
         let imageSuffix = submission.imageAttachments.isEmpty
             ? ""
             : " · \(submission.imageAttachments.count) image\(submission.imageAttachments.count == 1 ? "" : "s")"
-        let summaryLabel = NSTextField(labelWithString: question + imageSuffix)
+        let pdfSuffix = submission.includeCurrentPDF ? " · PDF" : ""
+        let summaryLabel = NSTextField(labelWithString: question + imageSuffix + pdfSuffix)
         summaryLabel.font = .systemFont(ofSize: 11.5)
         summaryLabel.textColor = .labelColor
         summaryLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.maximumNumberOfLines = 1
-        summaryLabel.toolTip = question + imageSuffix
+        summaryLabel.toolTip = question + imageSuffix + pdfSuffix
         summaryLabel.translatesAutoresizingMaskIntoConstraints = false
 
         removeButton.image = NSImage(
@@ -2287,6 +2500,7 @@ private final class AIChatTableGridView: NSGridView {
 private final class AIChatComposerTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onPasteboardImages: ((NSPasteboard) -> Bool)?
+    var pasteboardProvider: () -> NSPasteboard = { .general }
     var placeholderString = "" {
         didSet { needsDisplay = true }
     }
@@ -2345,9 +2559,38 @@ private final class AIChatComposerTextView: NSTextView {
         super.keyDown(with: event)
     }
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let relevantModifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if relevantModifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v",
+           onPasteboardImages?(pasteboardProvider()) == true {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func paste(_ sender: Any?) {
-        if onPasteboardImages?(NSPasteboard.general) == true { return }
+        if onPasteboardImages?(pasteboardProvider()) == true { return }
         super.paste(sender)
+    }
+
+    func performPasteKeyEquivalentForLayoutCheck(from pasteboard: NSPasteboard) -> Bool {
+        let previousProvider = pasteboardProvider
+        pasteboardProvider = { pasteboard }
+        defer { pasteboardProvider = previousProvider }
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "v",
+            charactersIgnoringModifiers: "v",
+            isARepeat: false,
+            keyCode: 9
+        ) else { return false }
+        return performKeyEquivalent(with: event)
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {

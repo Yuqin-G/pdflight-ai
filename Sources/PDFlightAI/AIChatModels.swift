@@ -30,6 +30,7 @@ public struct AIChatSubmission: Sendable, Equatable, Identifiable {
     public var question: String
     public var imageAttachments: [AIChatImageAttachment]
     public var promptPreset: AIPromptPreset
+    public var includeCurrentPDF: Bool
     public let createdAt: Date
 
     public init(
@@ -37,12 +38,14 @@ public struct AIChatSubmission: Sendable, Equatable, Identifiable {
         question: String,
         imageAttachments: [AIChatImageAttachment] = [],
         promptPreset: AIPromptPreset,
+        includeCurrentPDF: Bool = false,
         createdAt: Date = Date()
     ) {
         self.id = id
         self.question = question
         self.imageAttachments = imageAttachments
         self.promptPreset = promptPreset
+        self.includeCurrentPDF = includeCurrentPDF
         self.createdAt = createdAt
     }
 }

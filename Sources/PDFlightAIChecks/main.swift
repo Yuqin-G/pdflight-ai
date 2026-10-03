@@ -26,6 +26,10 @@ enum PDFlightAIChecks {
         print("PASS: neither prompt mode sends hidden PDF page context")
         try universalWebAPIRequestsCarryTheLocalConversationIdentity()
         print("PASS: Universal Web API requests bind one local conversation to one web conversation")
+        try localPDFsUseTheUniversalWebAPIAttachmentExtension()
+        print("PASS: current PDFs are attached only to localhost Universal Web API requests")
+        try attachmentOnlySubmissionsKeepTheSelectedPromptMode()
+        print("PASS: PDF attachments keep Reading and custom prompt modes independent")
         try imageAttachmentsStayPortableAndUseMultimodalRequestContent()
         print("PASS: chat images stay portable and use OpenAI-compatible multimodal content")
         try queuedChatSubmissionsRemainFIFOAndKeepImages()
@@ -124,6 +128,60 @@ enum PDFlightAIChecks {
             ],
             "expected display math with Chinese text labels to reach iosMath"
         )
+        let overEscapedSets = #"$\\\\{ \\\hat{y}\_1, \\\hat{y}\_2, \\\dots, \\\hat{y}\_N \\\\}$ 和 $\\\mathcal{U} = \\\\{ \\\tilde{y}\_1, \\\dots, \\\tilde{y}\_M \\\\}$"#
+        let overEscapedSegments = AIMessageContentParser.segments(in: overEscapedSets)
+        try check(
+            overEscapedSegments == [
+                .math(latex: #"\{ \hat{y}_1, \hat{y}_2, \dots, \hat{y}_N \}"#, display: false),
+                .text(" 和 "),
+                .math(latex: #"\mathcal{U} = \{ \tilde{y}_1, \dots, \tilde{y}_M \}"#, display: false)
+            ],
+            "expected repeatedly escaped set notation and subscripts to normalize before math rendering; got \(overEscapedSegments)"
+        )
+        let rowBreakBeforeCommand = #"$$\begin{aligned}x &= 1\\\text{next}\end{aligned}$$"#
+        try check(
+            AIMessageContentParser.segments(in: rowBreakBeforeCommand) == [
+                .math(
+                    latex: #"\begin{aligned}x &= 1\\\text{next}\end{aligned}"#,
+                    display: true
+                )
+            ],
+            "expected a valid row break immediately followed by a command to remain unchanged"
+        )
+        let overEscapedReward = #"""
+        $$
+        R^{S}(V) =
+        \\\begin{cases}
+        \\\delta(Q)\\\frac{1}{|\\\tilde{Q}|}\\\sum_{m\\\in\\\tilde{Q}} r^{S}_{m}
+        - \\\eta \\\frac{D}{1+D}, & |\\\tilde{Q}| > 0 \\\\
+        -\\\eta, & |\\\tilde{Q}| = 0
+        \\\end{cases}
+        $$
+        """#
+        let expectedReward = #"R^{S}(V) = \begin{cases} \delta(Q)\frac{1}{|\tilde{Q}|}\sum_{m\in\tilde{Q}} r^{S}_{m} - \eta \frac{D}{1+D}, & |\tilde{Q}| > 0 \\ -\eta, & |\tilde{Q}| = 0 \end{cases}"#
+        try check(
+            AIMessageContentParser.segments(in: overEscapedReward) == [
+                .math(latex: expectedReward, display: true)
+            ],
+            "expected a repeatedly escaped cases formula to normalize before rendering"
+        )
+        let overEscapedLoss = #"""
+        $$
+        \\\mathcal{L} =
+        \\\mathcal{L}^{L}
+        + \\\alpha \\\mathcal{L}^{S}
+        + \\\beta \\\mathcal{L}^{KL}
+        $$
+        """#
+        try check(
+            AIMessageContentParser.segments(in: overEscapedLoss) == [
+                .math(
+                    latex: #"\mathcal{L} = \mathcal{L}^{L} + \alpha \mathcal{L}^{S} + \beta \mathcal{L}^{KL}"#,
+                    display: true
+                )
+            ],
+            "expected repeatedly escaped display commands to normalize before rendering"
+        )
         try check(
             !AIMessageContentParser.isPlausibleLatex("x + 普通中文"),
             "expected Unicode prose outside a LaTeX text group to remain ordinary text"
@@ -176,6 +234,21 @@ enum PDFlightAIChecks {
         try check(
             blocks.contains(.code(language: "swift", content: "let score = 91.2")),
             "expected a fenced code block"
+        )
+
+        let displayWithListMarker = #"""
+        $$
+        R = \begin{cases}
+        1, & x > 0 \\
+        - \eta, & x \le 0
+        \end{cases}
+        $$
+        """#
+        try check(
+            AIChatMarkdownParser.blocks(in: displayWithListMarker) == [
+                .paragraph(displayWithListMarker)
+            ],
+            "expected list-like lines inside standalone display math to remain in one Markdown block"
         )
     }
 
@@ -274,6 +347,106 @@ enum PDFlightAIChecks {
         try check(textMessages.first?["content"] as? String == "text only", "expected text-only content to stay a string")
     }
 
+    private static func localPDFsUseTheUniversalWebAPIAttachmentExtension() throws {
+        let pdfURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PDFlight-current-paper.pdf")
+        let localConfiguration = AIProviderConfiguration(
+            baseURL: "http://127.0.0.1:8199/v1",
+            model: "qwen"
+        )
+        let client = OpenAICompatibleClient()
+        let request = try client.makeRequest(
+            messages: [AIChatMessage(role: .user, content: "Read this paper")],
+            configuration: localConfiguration,
+            apiKey: "",
+            currentPDFURL: pdfURL
+        )
+        let body = try checkNotNil(request.httpBody, "expected a PDF request body")
+        let JSON = try checkNotNil(
+            JSONSerialization.jsonObject(with: body) as? [String: Any],
+            "expected a PDF JSON request"
+        )
+        let PDFs = try checkNotNil(
+            JSON["pdf_attachments"] as? [[String: Any]],
+            "expected the Universal Web API PDF extension"
+        )
+        try check(PDFs.count == 1, "expected exactly one current PDF")
+        try check(PDFs[0]["path"] as? String == pdfURL.path, "expected the local PDF path")
+        try check(PDFs[0]["mime_type"] as? String == "application/pdf", "expected PDF MIME type")
+
+        do {
+            _ = try client.makeRequest(
+                messages: [AIChatMessage(role: .user, content: "Read this paper")],
+                configuration: AIProviderConfiguration(
+                    baseURL: "https://example.com/v1",
+                    model: "remote"
+                ),
+                apiKey: "",
+                currentPDFURL: pdfURL
+            )
+            throw CheckFailure(message: "expected local file paths to be rejected for remote APIs")
+        } catch let error as OpenAICompatibleError {
+            guard case .invalidConfiguration = error else { throw error }
+        }
+    }
+
+    private static func attachmentOnlySubmissionsKeepTheSelectedPromptMode() throws {
+        let reading = try checkNotNil(
+            AIPromptTemplate.defaults.first { $0.id == AIPromptPreset.reading.rawValue },
+            "expected the Reading prompt template"
+        )
+        let readingQuestion = AIChatRequestBuilder.displayQuestion(
+            question: "",
+            template: reading,
+            hasImageAttachments: false,
+            includeCurrentPDF: true
+        )
+        try check(
+            readingQuestion == "Reading",
+            "expected an attached PDF to use the selected Reading mode instead of an English fallback prompt"
+        )
+        let readingMessages = AIChatRequestBuilder.messages(
+            instruction: reading.instruction(title: "Example Paper"),
+            paperContext: nil,
+            conversation: [AIChatMessage(role: .user, content: readingQuestion ?? "")]
+        )
+        try check(
+            readingMessages.first?.role == .system
+                && readingMessages.first?.content.contains("Example Paper") == true
+                && readingMessages.last?.content == "Reading",
+            "expected the Reading instruction and attached-PDF user turn to be sent together"
+        )
+
+        let custom = AIPromptTemplate(id: "methods", name: "Methods", prompt: "Analyze {{title}}")
+        try check(
+            AIChatRequestBuilder.displayQuestion(
+                question: "",
+                template: custom,
+                hasImageAttachments: false,
+                includeCurrentPDF: true
+            ) == "Methods",
+            "expected PDF upload to preserve a custom prompt mode"
+        )
+        try check(
+            AIChatRequestBuilder.displayQuestion(
+                question: "",
+                template: AIPromptTemplate.defaults[0],
+                hasImageAttachments: false,
+                includeCurrentPDF: true
+            ) == "Attached PDF",
+            "expected No prompt PDF upload to use a neutral attachment label"
+        )
+        try check(
+            AIChatRequestBuilder.displayQuestion(
+                question: "Compare the ablation results",
+                template: reading,
+                hasImageAttachments: false,
+                includeCurrentPDF: true
+            ) == "Compare the ablation results",
+            "expected typed text to remain the visible question when a PDF is attached"
+        )
+    }
+
     private static func queuedChatSubmissionsRemainFIFOAndKeepImages() throws {
         let image = AIChatImageAttachment(
             id: "queued-image",
@@ -282,12 +455,18 @@ enum PDFlightAIChecks {
             data: Data([1, 2, 3])
         )
         var queue = AIChatSubmissionQueue()
-        let first = AIChatSubmission(question: "first", imageAttachments: [image], promptPreset: .none)
+        let first = AIChatSubmission(
+            question: "first",
+            imageAttachments: [image],
+            promptPreset: .none,
+            includeCurrentPDF: true
+        )
         let second = AIChatSubmission(question: "second", promptPreset: .reading)
         queue.enqueue(first)
         queue.enqueue(second)
         try check(queue.count == 2, "expected both submissions to be visible in the queue")
         try check(queue.dequeue() == first, "expected FIFO dequeue with image attachment intact")
+        try check(first.includeCurrentPDF, "expected queued PDF attachment intent to remain intact")
         try check(queue.dequeue() == second, "expected the second submission after the first")
         try check(queue.isEmpty, "expected no queued work after both submissions")
     }
@@ -420,6 +599,14 @@ enum PDFlightAIChecks {
 
         let writer = AIChatHistoryStore(directoryURL: directory)
         try await writer.save(firstHistory, for: firstPDF)
+
+        let firstHistoryURL = writer.fileURL(for: firstPDF)
+        try check(
+            firstHistoryURL.deletingLastPathComponent() == directory
+                && firstHistoryURL.pathExtension == "json"
+                && FileManager.default.fileExists(atPath: firstHistoryURL.path),
+            "expected the current paper's portable history URL to identify its saved JSON file"
+        )
 
         var secondHistory = AIPaperChatHistory.new(for: secondPDF)
         secondHistory.conversations[0].title = "Second paper"

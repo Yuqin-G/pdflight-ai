@@ -13,6 +13,8 @@ enum PDFlightAppSelfChecks {
     \\mathcal{J}_{GRPO}(\\theta) = \\mathbb{E} \\left[ \\frac{1}{G} \\sum_{i=1}^G \\frac{1}{|o_i|} \\sum_{t=1}^{|o_i|} \\left( \\underbrace{\\min \\left( \\rho_{i,t} \\hat{A}_i, \\text{clip}(\\rho_{i,t}, 1-\\epsilon, 1+\\epsilon) \\hat{A}_i \\right)}_{\\text{策略优化部分 (类似 PPO)}} - \\underbrace{\\beta \\mathbb{D}_{KL}(\\pi_\\theta || \\pi_{ref})}_{\\text{KL 散度惩罚}} \\right) \\right]
     """
     private static let casesLatex = #"r = \begin{cases} 1, & \left| \hat{d} - d \right| < \epsilon \\ 0, & \text{otherwise} \end{cases}"#
+    private static let rewardCasesLatex = #"R^{S}(V) = \begin{cases} \delta(Q)\frac{1}{|\tilde{Q}|}\sum_{m\in\tilde{Q}} r^{S}_{m} - \eta \frac{D}{1+D}, & |\tilde{Q}| > 0 \\ -\eta, & |\tilde{Q}| = 0 \end{cases}"#
+    private static let combinedLossLatex = #"\mathcal{L} = \mathcal{L}^{L} + \alpha \mathcal{L}^{S} + \beta \mathcal{L}^{KL}"#
 
     static func mathRendering() throws {
         IOSMathResourceLocator.install()
@@ -20,7 +22,11 @@ enum PDFlightAppSelfChecks {
             "r_n^{\\text{final}} =",
             "W_{ij} = \\exp(-d^2(f_i, f_j)/2",
             "M_\\theta \\xrightarrow{\\text{在原始 SafeWatch 上微调}} M_{\\theta_{sw}}",
+            #"\{ \hat{y}_1, \hat{y}_2, \dots, \hat{y}_N \}"#,
+            #"\mathcal{U} = \{ \tilde{y}_1, \dots, \tilde{y}_M \}"#,
             casesLatex,
+            rewardCasesLatex,
+            combinedLossLatex,
             labeledGRPOLatex
         ]
         for formula in formulas {
@@ -39,10 +45,40 @@ enum PDFlightAppSelfChecks {
                 description: "iosMath compatibility did not preserve the extended-arrow label"
             )
         }
+        guard IOSMathLatexCompatibility.renderable(#"\dots + \dotsb"#) == #"\ldots + \dotsb"# else {
+            throw AppSelfCheckFailure(
+                description: "iosMath compatibility did not translate the standalone \\dots command"
+            )
+        }
         print("PASS: iosMath accepts complete and recovered Qwen formulas")
     }
 
     static func sidebarLayout() throws {
+        let defaultComposerSidebar = AIChatSidebarView()
+        guard !defaultComposerSidebar.currentPDFAttachmentSelectedForLayoutCheck() else {
+            throw AppSelfCheckFailure(
+                description: "A new Ask PDF conversation enables PDF upload by default"
+            )
+        }
+        guard !ReaderSidebarResizeWorkPolicy.persistsSharedWidth(during: .live),
+              !ReaderSidebarResizeWorkPolicy.relayoutsDocument(during: .live),
+              ReaderSidebarResizeWorkPolicy.persistsSharedWidth(during: .ended),
+              ReaderSidebarResizeWorkPolicy.relayoutsDocument(during: .ended) else {
+            throw AppSelfCheckFailure(
+                description: "Live Ask PDF resizing still persists, broadcasts, or relayouts the PDF on every pointer event"
+            )
+        }
+        guard AIChatNestedScrollRouting.sendsToOuterVerticalScroll(
+            deltaX: 0.2,
+            deltaY: 8
+        ), !AIChatNestedScrollRouting.sendsToOuterVerticalScroll(
+            deltaX: 8,
+            deltaY: 0.2
+        ) else {
+            throw AppSelfCheckFailure(
+                description: "Display equations intercept vertical chat scrolling"
+            )
+        }
         guard ReaderCopyRouting.destination(
             editorSelectionLength: 12,
             hasPDFSelection: true
@@ -294,9 +330,27 @@ enum PDFlightAppSelfChecks {
                 description: "A custom prompt mode could not be selected as a button"
             )
         }
+        var promptChange: AIPromptPreset?
+        var sendsTriggeredByPromptSelection = 0
+        askSidebar.onPresetChange = { promptChange = $0 }
+        askSidebar.onSend = { _, _, _, _ in sendsTriggeredByPromptSelection += 1 }
+        askSidebar.triggerPromptPresetForLayoutCheck(.reading)
+        guard promptChange == .reading,
+              askSidebar.selectedPromptPresetForLayoutCheck() == .reading,
+              sendsTriggeredByPromptSelection == 0 else {
+            throw AppSelfCheckFailure(
+                description: "Selecting Reading triggers a chat request instead of only changing the local prompt mode"
+            )
+        }
 
         let originalFontSize = askSidebar.messageFontSizeForLayoutCheck()
         let originalComposerFontSize = askSidebar.composerFontSizeForLayoutCheck()
+        askSidebar.setCurrentPDFAttachmentSelectedForLayoutCheck(true)
+        guard askSidebar.currentPDFAttachmentIsVisuallyEmphasizedForLayoutCheck() else {
+            throw AppSelfCheckFailure(
+                description: "The selected PDF attachment is not visibly emphasized in the composer"
+            )
+        }
         askSidebar.setMessageFontSizeForLayoutCheck(originalFontSize + 3)
         guard askSidebar.messageFontSizeForLayoutCheck() == originalFontSize + 3 else {
             throw AppSelfCheckFailure(
@@ -331,7 +385,7 @@ enum PDFlightAppSelfChecks {
             data: Data([0x89, 0x50, 0x4E, 0x47])
         )
         var sentImageIDs: [String] = []
-        askSidebar.onSend = { _, images, _ in
+        askSidebar.onSend = { _, images, _, _ in
             sentImageIDs = images.map(\.id)
         }
         askSidebar.addImageAttachmentForLayoutCheck(pastedImage)
@@ -341,6 +395,34 @@ enum PDFlightAppSelfChecks {
         askSidebar.triggerSendForLayoutCheck()
         guard sentImageIDs == [pastedImage.id] else {
             throw AppSelfCheckFailure(description: "The composer did not send its image attachment")
+        }
+
+        let imagePasteboard = NSPasteboard(name: NSPasteboard.Name("dev.pdflight.self-check.image-paste"))
+        imagePasteboard.clearContents()
+        let imageFixture = NSImage(size: NSSize(width: 8, height: 8))
+        imageFixture.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 8, height: 8)).fill()
+        imageFixture.unlockFocus()
+        guard let TIFF = imageFixture.tiffRepresentation else {
+            throw AppSelfCheckFailure(description: "Could not create the image paste fixture")
+        }
+        imagePasteboard.setData(TIFF, forType: .tiff)
+        guard askSidebar.pasteImageFromKeyboardForLayoutCheck(imagePasteboard),
+              askSidebar.composerImageAttachmentCountForLayoutCheck() == 1 else {
+            throw AppSelfCheckFailure(
+                description: "Command-V does not turn an image pasteboard into a visible composer attachment"
+            )
+        }
+        askSidebar.clearComposer()
+
+        var revealedCurrentHistory = false
+        askSidebar.onRevealCurrentHistory = { revealedCurrentHistory = true }
+        askSidebar.triggerRevealCurrentHistoryForLayoutCheck()
+        guard revealedCurrentHistory else {
+            throw AppSelfCheckFailure(
+                description: "The Ask PDF header cannot reveal the current paper's chat record"
+            )
         }
         askSidebar.setStreaming(true)
         guard askSidebar.composerAcceptsQueuedInputForLayoutCheck() else {
@@ -420,9 +502,15 @@ enum PDFlightAppSelfChecks {
         let markdown = AIChatMessage(
             id: "markdown-check",
             role: .assistant,
-            content: "# Method\n\n- Encode frames\n- Rank evidence\n\n**Result**"
+            content: "# Method\n\n- Encode frames\n- Rank evidence\n\n**Result**",
+            createdAt: Date(timeIntervalSince1970: 1_704_164_640)
         )
         askSidebar.install([markdown])
+        guard askSidebar.messageTimestampForLayoutCheck(id: markdown.id) == "01-02 11:04" else {
+            throw AppSelfCheckFailure(
+                description: "Assistant messages do not display their creation time in Asia/Shanghai"
+            )
+        }
         let renderedMarkdown = askSidebar.renderedMessageTextForLayoutCheck(id: markdown.id)
         guard askSidebar.messageContentContainsSelectableTextForLayoutCheck(id: markdown.id) else {
             throw AppSelfCheckFailure(
@@ -554,6 +642,59 @@ enum PDFlightAppSelfChecks {
               !askSidebar.renderedMessageTextForLayoutCheck(id: multilineCases.id).contains("$$") else {
             throw AppSelfCheckFailure(
                 description: "Standalone multiline $$ cases remain visible instead of rendering as one formula"
+            )
+        }
+
+        let repeatedlyEscapedDisplays = AIChatMessage(
+            id: "repeatedly-escaped-display-check",
+            role: .assistant,
+            content: #"""
+            $$
+            R^{S}(V) =
+            \\\begin{cases}
+            \\\delta(Q)\\\frac{1}{|\\\tilde{Q}|}\\\sum_{m\\\in\\\tilde{Q}} r^{S}_{m}
+            - \\\eta \\\frac{D}{1+D}, & |\\\tilde{Q}| > 0 \\\\
+            -\\\eta, & |\\\tilde{Q}| = 0
+            \\\end{cases}
+            $$
+
+            $$
+            \\\mathcal{L} =
+            \\\mathcal{L}^{L}
+            + \\\alpha \\\mathcal{L}^{S}
+            + \\\beta \\\mathcal{L}^{KL}
+            $$
+            """#
+        )
+        askSidebar.install([repeatedlyEscapedDisplays])
+        let repeatedlyEscapedLatex = askSidebar.renderedMathLatexForLayoutCheck(
+            id: repeatedlyEscapedDisplays.id
+        )
+        let repeatedlyEscapedText = askSidebar.renderedMessageTextForLayoutCheck(
+            id: repeatedlyEscapedDisplays.id
+        )
+        guard repeatedlyEscapedLatex == [
+            rewardCasesLatex,
+            combinedLossLatex
+        ], !repeatedlyEscapedText.contains("\\mathcal") else {
+            throw AppSelfCheckFailure(
+                description: "Repeatedly escaped display formulas remain raw in the reply renderer: "
+                    + "latex=\(repeatedlyEscapedLatex), text=\(repeatedlyEscapedText)"
+            )
+        }
+
+        let escapedSetMath = AIChatMessage(
+            id: "escaped-set-math-check",
+            role: .assistant,
+            content: #"$\\\\{ \\\hat{y}\_1, \\\hat{y}\_2, \\\dots, \\\hat{y}\_N \\\\}$ 和 $\\\mathcal{U} = \\\\{ \\\tilde{y}\_1, \\\dots, \\\tilde{y}\_M \\\\}$"#
+        )
+        askSidebar.install([escapedSetMath])
+        let escapedSetRenderedText = askSidebar.renderedMessageTextForLayoutCheck(id: escapedSetMath.id)
+        guard askSidebar.inlineMathAttachmentCountForLayoutCheck(id: escapedSetMath.id) == 2,
+              !escapedSetRenderedText.contains("\\hat"),
+              !escapedSetRenderedText.contains("\\mathcal") else {
+            throw AppSelfCheckFailure(
+                description: "Repeatedly escaped inline set notation remains raw in the reply renderer"
             )
         }
 

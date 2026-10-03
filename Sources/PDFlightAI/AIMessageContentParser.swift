@@ -42,11 +42,13 @@ public enum AIMessageContentParser {
 
             if let closingRange {
                 let rawLatex = String(content[bodyStart..<closingRange.lowerBound])
+                let trimmedRawLatex = rawLatex.trimmingCharacters(in: .whitespacesAndNewlines)
                 let latex = normalizedLatex(
                     rawLatex,
                     display: opening.delimiter.display
                 )
-                let hasCleanInlineBoundary = opening.delimiter.opening != "$" || rawLatex == latex
+                let hasCleanInlineBoundary = opening.delimiter.opening != "$"
+                    || rawLatex == trimmedRawLatex
                 if hasCleanInlineBoundary, isPlausibleLatex(latex) {
                     result.append(.math(latex: latex, display: opening.delimiter.display))
                     cursor = closingRange.upperBound
@@ -80,16 +82,96 @@ public enum AIMessageContentParser {
 
     private static func normalizedLatex(_ rawLatex: String, display: Bool) -> String {
         let trimmed = rawLatex.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard display, trimmed.contains(where: { $0.isNewline }) else {
-            return trimmed
+        let singleLine: String
+        if display, trimmed.contains(where: { $0.isNewline }) {
+            singleLine = trimmed
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        } else {
+            singleLine = trimmed
         }
-        return trimmed
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        return normalizeRepeatedEscapes(in: singleLine)
+    }
+
+    /// Some model gateways return LaTeX that has been escaped once for JSON and
+    /// then escaped again as ordinary text. Normalize only formulas that carry
+    /// that repeated-escape fingerprint so valid `\\` row breaks remain intact.
+    private static func normalizeRepeatedEscapes(in latex: String) -> String {
+        var cursor = latex.startIndex
+        var hasRepeatedStructuralEscape = false
+        var repeatedCommandRunCount = 0
+        while cursor < latex.endIndex {
+            guard latex[cursor] == "\\" else {
+                cursor = latex.index(after: cursor)
+                continue
+            }
+            var end = cursor
+            var count = 0
+            while end < latex.endIndex, latex[end] == "\\" {
+                count += 1
+                end = latex.index(after: end)
+            }
+            if count > 1, end < latex.endIndex {
+                let next = latex[end]
+                if next == "{" || next == "}" {
+                    hasRepeatedStructuralEscape = true
+                    break
+                }
+                if count >= 3, next.isLetter {
+                    repeatedCommandRunCount += 1
+                    let prefix = latex[..<cursor]
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if prefix.isEmpty {
+                        hasRepeatedStructuralEscape = true
+                        break
+                    }
+                }
+            }
+            cursor = end
+        }
+        if repeatedCommandRunCount >= 2 {
+            hasRepeatedStructuralEscape = true
+        }
+        guard hasRepeatedStructuralEscape else { return latex }
+
+        var normalized = ""
+        cursor = latex.startIndex
+        while cursor < latex.endIndex {
+            guard latex[cursor] == "\\" else {
+                normalized.append(latex[cursor])
+                cursor = latex.index(after: cursor)
+                continue
+            }
+            var end = cursor
+            var count = 0
+            while end < latex.endIndex, latex[end] == "\\" {
+                count += 1
+                end = latex.index(after: end)
+            }
+            guard end < latex.endIndex else {
+                normalized.append(String(repeating: "\\", count: count))
+                break
+            }
+            let next = latex[end]
+            if next == "_" {
+                normalized.append("_")
+                cursor = latex.index(after: end)
+            } else if count > 1, next.isLetter || next == "{" || next == "}" {
+                normalized.append("\\")
+                cursor = end
+            } else if count >= 4, count.isMultiple(of: 2), next.isWhitespace {
+                normalized.append(String(repeating: "\\", count: count / 2))
+                cursor = end
+            } else {
+                normalized.append(String(repeating: "\\", count: count))
+                cursor = end
+            }
+        }
+        return normalized
     }
 
     public static func isPlausibleLatex(_ latex: String) -> Bool {

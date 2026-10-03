@@ -8,6 +8,18 @@ public actor AIChatHistoryStore {
 
     public nonisolated var storageDirectoryURL: URL { directoryURL }
 
+    /// The portable JSON file used for one PDF's conversations.
+    ///
+    /// Exposing this URL lets the app reveal the current paper's record in
+    /// Finder without duplicating the stable path-hashing scheme.
+    public nonisolated func fileURL(for documentURL: URL) -> URL {
+        let identity = documentURL.standardizedFileURL.path
+        let digest = SHA256.hash(data: Data(identity.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return directoryURL.appendingPathComponent("\(digest).json")
+    }
+
     public init(directoryURL: URL) {
         self.directoryURL = directoryURL
         let encoder = JSONEncoder()
@@ -37,7 +49,7 @@ public actor AIChatHistoryStore {
     }
 
     public func history(for documentURL: URL) throws -> AIPaperChatHistory {
-        let fileURL = historyURL(for: documentURL)
+        let fileURL = fileURL(for: documentURL)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             return .new(for: documentURL)
         }
@@ -75,7 +87,7 @@ public actor AIChatHistoryStore {
             withIntermediateDirectories: true
         )
         let data = try encoder.encode(normalized(history, for: documentURL))
-        try data.write(to: historyURL(for: documentURL), options: .atomic)
+        try data.write(to: fileURL(for: documentURL), options: .atomic)
     }
 
     public func allHistories() throws -> [AIPaperChatHistory] {
@@ -102,17 +114,9 @@ public actor AIChatHistoryStore {
     }
 
     public func clear(for documentURL: URL) throws {
-        let fileURL = historyURL(for: documentURL)
+        let fileURL = fileURL(for: documentURL)
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         try FileManager.default.removeItem(at: fileURL)
-    }
-
-    private func historyURL(for documentURL: URL) -> URL {
-        let identity = documentURL.standardizedFileURL.path
-        let digest = SHA256.hash(data: Data(identity.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return directoryURL.appendingPathComponent("\(digest).json")
     }
 
     private func normalized(

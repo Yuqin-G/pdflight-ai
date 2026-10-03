@@ -96,11 +96,19 @@ enum PDFlightCoreChecks {
         let first = URL(fileURLWithPath: "/Users/reader/Papers/first.pdf")
         let second = URL(fileURLWithPath: "/Users/reader/Papers/second.PDF")
         let store = ReaderSessionStore(fileURL: fileURL)
-        try store.save(documentURLs: [first, first, URL(fileURLWithPath: "/tmp/note.txt"), second])
-        let restored = try store.documentURLs()
+        try store.save(
+            documentURLs: [first, first, URL(fileURLWithPath: "/tmp/note.txt"), second],
+            activeDocumentURL: first
+        )
+        let restoredState = try store.state()
+        let restored = restoredState.documentURLs
         try check(
             restored == [first.standardizedFileURL, second.standardizedFileURL],
             "expected a portable, deduplicated PDF window session"
+        )
+        try check(
+            restoredState.activeDocumentURL == first.standardizedFileURL,
+            "expected the last active PDF tab to survive a session reload"
         )
         try store.clear()
         let cleared = try store.documentURLs()
