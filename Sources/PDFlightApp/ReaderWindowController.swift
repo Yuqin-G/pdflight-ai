@@ -271,6 +271,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private var pages: [DocumentPage] = []
     private var currentPage = 0
     private var zoom = 1.0
+    /// Beyond these caps pages are rendered once at the capped scale and
+    /// upscaled by the view, instead of allocating giant bitmaps per zoom
+    /// level (a 8x Retina render of one A4 page is ~500 MB of VRAM).
+    private static let maxRenderPixels: Double = 25_000_000
+    private static let maxRenderDimension: Double = 8192
     private var tool: ReaderTool = .select
     private var navigationHistory: [DocumentViewportBookmark] = []
     private var loadTask: Task<Void, Never>?
@@ -1212,7 +1217,18 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 }
             }
             do {
-                let request = PageRenderRequest(pageIndex: pageIndex, scale: requestedZoom * backingScale)
+                guard pages.indices.contains(pageIndex) else { return }
+                let page = pages[pageIndex]
+                var renderScale = requestedZoom * backingScale
+                let nativePixels = page.width * page.height * renderScale * renderScale
+                if nativePixels > Self.maxRenderPixels {
+                    renderScale = (Self.maxRenderPixels / (page.width * page.height)).squareRoot()
+                }
+                let longestSide = max(page.width, page.height) * renderScale
+                if longestSide > Self.maxRenderDimension {
+                    renderScale = Self.maxRenderDimension / max(page.width, page.height)
+                }
+                let request = PageRenderRequest(pageIndex: pageIndex, scale: renderScale)
                 let rendered = try await scheduler.render(request)
                 guard !Task.isCancelled, generation == renderGeneration,
                       canvasView.pageViews.indices.contains(pageIndex) else { return }
@@ -1647,7 +1663,21 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 let conversationTitle = conversationKey == nil
                     ? nil
                     : await qwenConversationTitle()
-                _ = await LocalWebBridge.shared.ensureReady(for: configuration.baseURL)
+                let bridge = LocalWebBridge.shared
+                if let endpoint = bridge.bridgeEndpoint(from: configuration.baseURL),
+                   !(await bridge.probe(endpoint)) {
+                    aiSidebar.setActivity(.preparing, detail: "Starting local bridge…")
+                    aiSidebar.setMessageActivity(
+                        id: placeholder.id,
+                        phase: .preparing,
+                        identity: providerIdentity
+                    )
+                }
+                guard await bridge.ensureReady(for: configuration.baseURL) else {
+                    throw OpenAICompatibleError.invalidConfiguration(
+                        "Local web bridge did not start on \(configuration.baseURL). See uwa-lite.log in Application Support."
+                    )
+                }
                 let stream = aiClient.streamChat(
                     messages: requestMessages,
                     configuration: configuration,

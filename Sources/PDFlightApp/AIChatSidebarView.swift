@@ -1420,6 +1420,9 @@ private final class AIChatMessageView: NSView {
     private let card = NSView()
     private var activityHeightConstraint: NSLayoutConstraint!
     private var contentTopConstraint: NSLayoutConstraint!
+    private var actionRowHeightConstraint: NSLayoutConstraint!
+    private var actionRowTopConstraint: NSLayoutConstraint!
+    private var actionRowVisible = false
     private let isAssistant: Bool
     private var rawContent: String
 
@@ -1555,6 +1558,9 @@ private final class AIChatMessageView: NSView {
         card.addSubview(actionRow)
         activityHeightConstraint = activityPanel.heightAnchor.constraint(equalToConstant: 0)
         contentTopConstraint = contentView.topAnchor.constraint(equalTo: activityPanel.bottomAnchor)
+        actionRowTopConstraint = actionRow.topAnchor.constraint(equalTo: contentView.bottomAnchor)
+        actionRowHeightConstraint = actionRow.heightAnchor.constraint(equalToConstant: 0)
+        actionRow.isHidden = true
         NSLayoutConstraint.activate([
             card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: isUser ? 52 : 0),
             card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: isUser ? 0 : -4),
@@ -1595,14 +1601,40 @@ private final class AIChatMessageView: NSView {
             contentTopConstraint,
             contentView.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
             contentView.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
-            actionRow.topAnchor.constraint(equalTo: contentView.bottomAnchor, constant: 8),
+            actionRowTopConstraint,
             actionRow.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
             actionRow.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10),
             actionRow.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8),
-            actionRow.heightAnchor.constraint(equalToConstant: 22)
+            actionRowHeightConstraint
         ])
         contentView.setImageAttachments(message.imageAttachments)
         setContent(message.content, renderMarkdown: message.role == .assistant)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        setActionRowVisible(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setActionRowVisible(false)
+    }
+
+    private func setActionRowVisible(_ visible: Bool) {
+        guard visible != actionRowVisible else { return }
+        actionRowVisible = visible
+        actionRow.isHidden = !visible
+        actionRowHeightConstraint.constant = visible ? 22 : 0
+        actionRowTopConstraint.constant = visible ? 8 : 0
     }
 
     private static func beijingTimestamp(
@@ -2081,7 +2113,7 @@ private final class AIChatRenderedContentView: NSStackView {
         let resolvedSize = fontSize
         let bodyFont = NSFont.systemFont(ofSize: resolvedSize, weight: weight)
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = max(2, resolvedSize * 0.22)
+        paragraphStyle.lineSpacing = max(2, resolvedSize * 0.26)
         paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(4, resolvedSize * 0.36)
         if markdown,
            let attributed = try? AttributedString(
