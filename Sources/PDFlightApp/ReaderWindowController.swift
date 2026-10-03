@@ -520,10 +520,9 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 await scheduler.invalidate(pageIndex: pageIndex)
                 recordAnnotationAdded()
                 pageView?.clearSelection()
-                if canvasView.pageViews.indices.contains(pageIndex) {
-                    canvasView.pageViews[pageIndex].image = nil
-                }
-                requestRender(for: pageIndex)
+                // Keep the old image on screen until the re-rendered page
+                // arrives; clearing it first flashes a blank frame.
+                requestRender(for: pageIndex, replacingExistingImage: true)
             } catch {
                 present(error: error, title: "Could not add highlight")
             }
@@ -615,10 +614,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 editState = undoEditStates.removeLast()
                 updateEditedState()
                 await scheduler.invalidate(pageIndex: pageIndex)
-                if canvasView.pageViews.indices.contains(pageIndex) {
-                    canvasView.pageViews[pageIndex].image = nil
-                }
-                requestRender(for: pageIndex)
+                requestRender(for: pageIndex, replacingExistingImage: true)
             } catch {
                 present(error: error, title: "Could not undo annotation")
             }
@@ -2515,10 +2511,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 try await engine.add(annotation)
                 await scheduler.invalidate(pageIndex: pageIndex)
                 recordAnnotationAdded()
-                if canvasView.pageViews.indices.contains(pageIndex) {
-                    canvasView.pageViews[pageIndex].image = nil
-                }
-                requestRender(for: pageIndex)
+                requestRender(for: pageIndex, replacingExistingImage: true)
             } catch {
                 present(error: error, title: failureTitle)
             }

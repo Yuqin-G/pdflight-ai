@@ -353,9 +353,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 newWindow.makeKeyAndOrderFront(nil)
             } else {
                 reader.showWindow(nil)
-                if UserDefaults.standard.bool(
+                let storedFullScreen = UserDefaults.standard.object(
                     forKey: ReaderWindowController.windowFullScreenDefaultsKey
-                ), let window = reader.window {
+                ) as? Bool
+                // First launch defaults to full screen; after that the
+                // last state the user chose is what gets restored.
+                if storedFullScreen ?? true, let window = reader.window {
                     DispatchQueue.main.async {
                         guard !window.styleMask.contains(.fullScreen) else { return }
                         window.toggleFullScreen(nil)
