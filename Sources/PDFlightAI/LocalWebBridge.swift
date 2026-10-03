@@ -164,6 +164,13 @@ public final class LocalWebBridge: @unchecked Sendable {
            ) {
             return bundled
         }
+        let supportHome = Self.supportDirectory()
+            .appendingPathComponent("uwa-lite", isDirectory: true)
+        if fileManager.fileExists(
+            atPath: supportHome.appendingPathComponent("main.py").path
+        ) {
+            return supportHome
+        }
         var probe = Bundle.main.executableURL?.deletingLastPathComponent()
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         while true {
