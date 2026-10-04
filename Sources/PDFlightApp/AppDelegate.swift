@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let aiPromptTemplateStore = AIPromptTemplateStore(fileURL: AppDelegate.aiPromptTemplatesURL)
     private let aiConfigurationStore = AppDelegate.makeAIConfigurationStore()
     private var recentPapers: [PaperLibraryPaper] = []
+    private var quickOpenPanel: QuickOpenPanel?
     private weak var openRecentMenu: NSMenu?
     private var isTerminating = false
 
@@ -252,6 +253,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func nextPage(_ sender: Any?) {
         keyReader?.nextPage(sender)
+    }
+
+    @objc func goToPage(_ sender: Any?) {
+        keyReader?.goToPage(sender)
+    }
+
+    @objc func quickOpen(_ sender: Any?) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let papers = (try? await paperLibraryStore.snapshot().papers) ?? []
+            if quickOpenPanel == nil {
+                let panel = QuickOpenPanel()
+                panel.onSelect = { [weak self] url in self?.open(url) }
+                quickOpenPanel = panel
+            }
+            quickOpenPanel?.show(papers: papers)
+        }
     }
 
     @objc func goBack(_ sender: Any?) {
@@ -524,6 +542,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fileItem.submenu = fileMenu
         let open = fileMenu.addItem(withTitle: "Open…", action: #selector(openDocument(_:)), keyEquivalent: "o")
         open.target = self
+        let quickOpen = fileMenu.addItem(
+            withTitle: "Quick Open…",
+            action: #selector(quickOpen(_:)),
+            keyEquivalent: "p"
+        )
+        quickOpen.target = self
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         let recentMenu = NSMenu(title: "Open Recent")
         recentMenu.delegate = self
@@ -566,6 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addMenuItem(to: navigateMenu, title: "Back", action: #selector(goBack(_:)), key: String(UnicodeScalar(NSLeftArrowFunctionKey)!), modifiers: [.command])
         addMenuItem(to: navigateMenu, title: "Previous Page", action: #selector(previousPage(_:)), key: "", modifiers: [])
         addMenuItem(to: navigateMenu, title: "Next Page", action: #selector(nextPage(_:)), key: "", modifiers: [])
+        addMenuItem(to: navigateMenu, title: "Go to Page…", action: #selector(goToPage(_:)), key: "g", modifiers: [.command, .option])
 
         let viewItem = NSMenuItem()
         mainMenu.addItem(viewItem)

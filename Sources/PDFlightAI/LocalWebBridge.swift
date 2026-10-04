@@ -115,6 +115,12 @@ public final class LocalWebBridge: @unchecked Sendable {
             var environment = ProcessInfo.processInfo.environment
             environment["APP_PORT"] = String(endpoint.port)
             environment["APP_HOST"] = "127.0.0.1"
+            if python.path.contains("/runtime/bin/"),
+               let sitePackages = sitePackagesDirectory(under: home) {
+                let existing = environment["PYTHONPATH"]
+                environment["PYTHONPATH"] = [sitePackages.path, existing]
+                    .compactMap { $0 }.joined(separator: ":")
+            }
             process.environment = environment
 
             let logURL = logFileURL
@@ -157,19 +163,28 @@ public final class LocalWebBridge: @unchecked Sendable {
            ) {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
-        if let bundled = Bundle.main.resourceURL?
-            .appendingPathComponent("uwa-lite", isDirectory: true),
-           fileManager.fileExists(
-            atPath: bundled.appendingPathComponent("main.py").path
-           ) {
-            return bundled
-        }
         let supportHome = Self.supportDirectory()
             .appendingPathComponent("uwa-lite", isDirectory: true)
         if fileManager.fileExists(
             atPath: supportHome.appendingPathComponent("main.py").path
         ) {
             return supportHome
+        }
+        if let bundled = Bundle.main.resourceURL?
+            .appendingPathComponent("uwa-lite", isDirectory: true),
+           fileManager.fileExists(
+            atPath: bundled.appendingPathComponent("main.py").path
+           ) {
+            // The bundle is read-only; run the service from a writable copy.
+            // Remove a stale directory or broken symlink before copying.
+            try? fileManager.removeItem(at: supportHome)
+            try? fileManager.copyItem(at: bundled, to: supportHome)
+            if fileManager.fileExists(
+                atPath: supportHome.appendingPathComponent("main.py").path
+            ) {
+                return supportHome
+            }
+            return bundled
         }
         var probe = Bundle.main.executableURL?.deletingLastPathComponent()
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -188,13 +203,30 @@ public final class LocalWebBridge: @unchecked Sendable {
 
     private func pythonExecutable(under home: URL) -> URL? {
         let fileManager = FileManager.default
-        let venvPython = home
-            .appendingPathComponent(".venv/bin/python", isDirectory: false)
-        if fileManager.isExecutableFile(atPath: venvPython.path) {
-            return venvPython
+        for relative in ["runtime/bin/python3", ".venv/bin/python"] {
+            let candidate = home.appendingPathComponent(relative, isDirectory: false)
+            if fileManager.isExecutableFile(atPath: candidate.path) {
+                return candidate
+            }
         }
         for name in ["python3.11", "python3.12", "python3.10", "python3"] {
             if let found = searchPATH(for: name) { return found }
+        }
+        return nil
+    }
+
+    private func sitePackagesDirectory(under home: URL) -> URL? {
+        let lib = home.appendingPathComponent(".venv/lib", isDirectory: true)
+        guard let versions = try? FileManager.default.contentsOfDirectory(
+            atPath: lib.path
+        ) else { return nil }
+        for version in versions where version.hasPrefix("python") {
+            let sitePackages = lib.appendingPathComponent(
+                "\(version)/site-packages", isDirectory: true
+            )
+            if FileManager.default.fileExists(atPath: sitePackages.path) {
+                return sitePackages
+            }
         }
         return nil
     }

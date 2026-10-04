@@ -23,6 +23,25 @@ cp "$PROJECT_ROOT/Resources/PDFlight.icns" "$STAGING_APP/Contents/Resources/PDFl
 for resource_bundle in "$BIN_DIR"/*.bundle(N); do
     cp -R "$resource_bundle" "$STAGING_APP/Contents/Resources/"
 done
+UWA_HOME="$PROJECT_ROOT/Services/uwa-lite"
+if [[ -d "$UWA_HOME" && -d "$UWA_HOME/.venv" ]]; then
+    RSYNC_EXCLUDES=(
+        --exclude '.env' --exclude 'logs/' --exclude '__pycache__/'
+        --exclude '*.sqlite3' --exclude '*.sqlite3-*'
+    )
+    mkdir -p "$STAGING_APP/Contents/Resources/uwa-lite"
+    rsync -a "${RSYNC_EXCLUDES[@]}" \
+        "$UWA_HOME/main.py" "$UWA_HOME/browser_ensure.py" \
+        "$UWA_HOME/requirements.txt" "$UWA_HOME/app" "$UWA_HOME/config" \
+        "$UWA_HOME/.venv" \
+        "$STAGING_APP/Contents/Resources/uwa-lite/"
+    UWA_RUNTIME=$(sed -n 's/^executable = //p' "$UWA_HOME/.venv/pyvenv.cfg" \
+        | xargs dirname 2>/dev/null | xargs dirname 2>/dev/null || true)
+    if [[ -n "${UWA_RUNTIME:-}" && -x "$UWA_RUNTIME/bin/python3" ]]; then
+        rsync -a --delete "$UWA_RUNTIME/" \
+            "$STAGING_APP/Contents/Resources/uwa-lite/runtime/"
+    fi
+fi
 mkdir -p "$STAGING_APP/Contents/Resources/ThirdParty"
 cp "$PROJECT_ROOT/.build/checkouts/iosMath/LICENSE" \
     "$STAGING_APP/Contents/Resources/ThirdParty/iosMath-LICENSE.txt"

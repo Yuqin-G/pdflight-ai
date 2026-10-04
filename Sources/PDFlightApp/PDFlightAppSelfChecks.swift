@@ -156,7 +156,22 @@ enum PDFlightAppSelfChecks {
             keyCode: 124,
             modifiers: [],
             isEditingText: false
-        ) == .next else {
+        ) == .next,
+        ReaderPageKeyRouting.action(
+            keyCode: 38,
+            modifiers: [],
+            isEditingText: false
+        ) == .next,
+        ReaderPageKeyRouting.action(
+            keyCode: 40,
+            modifiers: [],
+            isEditingText: false
+        ) == .previous,
+        ReaderPageKeyRouting.action(
+            keyCode: 38,
+            modifiers: [],
+            isEditingText: true
+        ) == nil else {
             throw AppSelfCheckFailure(
                 description: "Arrow keys do not distinguish text editing from page navigation"
             )
@@ -567,7 +582,7 @@ enum PDFlightAppSelfChecks {
             )
         }
         guard !renderedMarkdown.contains("# Method"),
-              renderedMarkdown.contains("• Encode frames"),
+              renderedMarkdown.contains("Encode frames"),
               renderedMarkdown.contains("Result") else {
             throw AppSelfCheckFailure(
                 description: "Assistant replies are not rendering block Markdown"

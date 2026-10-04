@@ -22,6 +22,8 @@ enum ReaderPageKeyRouting {
         }
         switch keyCode {
         case 14: return .highlightSelection
+        case 38: return .next        // j
+        case 40: return .previous    // k
         case 123: return .previous
         case 124: return .next
         default: return nil
@@ -442,6 +444,24 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
 
     @objc func nextPage(_ sender: Any?) {
         navigate(to: currentPage + 1)
+    }
+
+    @objc func goToPage(_ sender: Any?) {
+        guard pageCount > 0 else { return }
+        let alert = NSAlert()
+        alert.messageText = "Go to Page"
+        alert.informativeText = "Enter a page number (1–\(pageCount)):"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        field.stringValue = "\(currentPage + 1)"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Go")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let page = Int(field.stringValue
+                .trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...pageCount).contains(page) else { return }
+        navigate(to: page - 1)
     }
 
     @objc func goBack(_ sender: Any?) {
