@@ -4,8 +4,8 @@
 会话绑定（conversation_key）与浏览器工作流引擎。GUI、更新器、
 Anthropic/Codex 兼容层与命令配置面板均已移除。
 
-浏览器 profile 通过 BROWSER_PROFILE_DIR 指定，默认复用完整版 UWA 的
-chrome_profile（保留已登录站点会话）。
+浏览器 profile 通过 BROWSER_PROFILE_DIR 指定，默认使用 PDFlight
+Application Support 下的 chrome_profile（保留已登录站点会话）。
 """
 
 import asyncio
@@ -25,15 +25,17 @@ os.environ.setdefault("APP_PORT", "8199")
 os.environ.setdefault("AUTH_ENABLED", "false")
 os.environ.setdefault("DASHBOARD_ENABLED", "false")
 os.environ.setdefault("AUTO_UPDATE_ENABLED", "false")
-_DEFAULT_PROFILE = "/Users/yq/Applications/UniversalWebAPI/chrome_profile"
+_APP_SUPPORT = Path.home() / "Library/Application Support/dev.pdflight.reader"
 os.environ.setdefault(
     "BROWSER_PROFILE_DIR",
-    _DEFAULT_PROFILE if Path(_DEFAULT_PROFILE).exists() else "chrome_profile",
+    str(_APP_SUPPORT / "chrome_profile")
+    if (_APP_SUPPORT / "chrome_profile").exists()
+    else "chrome_profile",
 )
 os.environ.setdefault(
     "CONVERSATION_BINDINGS_DB",
-    "/Users/yq/Applications/UniversalWebAPI/config/conversation_bindings.sqlite3"
-    if Path("/Users/yq/Applications/UniversalWebAPI/config/conversation_bindings.sqlite3").exists()
+    str(_APP_SUPPORT / "conversation_bindings.sqlite3")
+    if (_APP_SUPPORT / "conversation_bindings.sqlite3").exists()
     else "config/conversation_bindings.sqlite3",
 )
 
