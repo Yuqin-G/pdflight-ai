@@ -27,7 +27,8 @@ UWA_HOME="$PROJECT_ROOT/Services/uwa-lite"
 if [[ -d "$UWA_HOME" && -d "$UWA_HOME/.venv" ]]; then
     RSYNC_EXCLUDES=(
         --exclude '.env' --exclude 'logs/' --exclude '__pycache__/'
-        --exclude '*.sqlite3' --exclude '*.sqlite3-*'
+        --exclude '*.pyc' --exclude '*.sqlite3' --exclude '*.sqlite3-*'
+        --exclude 'bin/' --exclude 'pyvenv.cfg'
     )
     mkdir -p "$STAGING_APP/Contents/Resources/uwa-lite"
     rsync -a "${RSYNC_EXCLUDES[@]}" \
@@ -35,6 +36,8 @@ if [[ -d "$UWA_HOME" && -d "$UWA_HOME/.venv" ]]; then
         "$UWA_HOME/requirements.txt" "$UWA_HOME/app" "$UWA_HOME/config" \
         "$UWA_HOME/.venv" \
         "$STAGING_APP/Contents/Resources/uwa-lite/"
+    find "$STAGING_APP/Contents/Resources/uwa-lite" \
+        -type d -name '__pycache__' -prune -exec rm -rf {} +
     UWA_RUNTIME=$(sed -n 's/^executable = //p' "$UWA_HOME/.venv/pyvenv.cfg" \
         | xargs dirname 2>/dev/null | xargs dirname 2>/dev/null || true)
     if [[ -n "${UWA_RUNTIME:-}" && -x "$UWA_RUNTIME/bin/python3" ]]; then

@@ -115,6 +115,7 @@ public final class LocalWebBridge: @unchecked Sendable {
             var environment = ProcessInfo.processInfo.environment
             environment["APP_PORT"] = String(endpoint.port)
             environment["APP_HOST"] = "127.0.0.1"
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
             if python.path.contains("/runtime/bin/"),
                let sitePackages = sitePackagesDirectory(under: home) {
                 let existing = environment["PYTHONPATH"]
