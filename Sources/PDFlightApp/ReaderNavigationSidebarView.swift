@@ -52,6 +52,7 @@ final class ReaderNavigationSidebarView: NSVisualEffectView {
 
         modeControl.selectedSegment = 0
         modeControl.controlSize = .small
+        modeControl.selectedSegmentBezelColor = AIChatClaudePalette.chipSelectedBackground
         modeControl.target = self
         modeControl.action = #selector(modeChanged(_:))
         modeControl.translatesAutoresizingMaskIntoConstraints = false

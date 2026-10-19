@@ -118,6 +118,13 @@ final class OutlineSidebarView: NSVisualEffectView, NSOutlineViewDataSource, NSO
         return cell
     }
 
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        rowViewForItem item: Any
+    ) -> NSTableRowView? {
+        ReaderWarmTableRowView()
+    }
+
     func outlineViewSelectionDidChange(_ notification: Notification) {
         let row = outlineView.selectedRow
         guard row >= 0,
@@ -136,6 +143,19 @@ final class OutlineSidebarView: NSVisualEffectView, NSOutlineViewDataSource, NSO
             }
             expandInitiallyOpenItems(in: item.children)
         }
+    }
+}
+
+/// Warm-tinted list row selection shared by the sidebars and the
+/// quick-open panel, replacing the cool system accent fill.
+final class ReaderWarmTableRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        AIChatClaudePalette.selectionFill.setFill()
+        NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 4, dy: 0.5),
+            xRadius: 6,
+            yRadius: 6
+        ).fill()
     }
 }
 

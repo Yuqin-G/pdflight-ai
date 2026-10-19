@@ -97,6 +97,7 @@ enum AIChatClaudePalette {
     static let sidebarBackground = dynamic(rgb(252, 252, 251), .windowBackgroundColor)
     static let chipSelectedBackground = dynamic(rgb(251, 243, 239), rgb(204, 107, 73, alpha: 0.18))
     static let chipHover = dynamic(rgb(0, 0, 0, alpha: 0.045), rgb(255, 255, 255, alpha: 0.06))
+    static let selectionFill = dynamic(rgb(234, 230, 220), rgb(255, 255, 255, alpha: 0.09))
 }
 
 @MainActor

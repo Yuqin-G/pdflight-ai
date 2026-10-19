@@ -269,8 +269,15 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
                 : "doc.text",
             accessibilityDescription: nil
         )
-        cell.imageView?.contentTintColor = item.paper == nil ? .systemBlue : .secondaryLabelColor
+        cell.imageView?.contentTintColor = item.paper == nil ? AIChatClaudePalette.clay : .secondaryLabelColor
         return cell
+    }
+
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        rowViewForItem item: Any
+    ) -> NSTableRowView? {
+        ReaderWarmTableRowView()
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
