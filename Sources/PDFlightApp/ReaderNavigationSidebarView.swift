@@ -50,6 +50,20 @@ final class ReaderNavigationSidebarView: NSVisualEffectView {
         state = .active
         translatesAutoresizingMaskIntoConstraints = false
 
+        // Warm clay-tinted wash over the sidebar material so this panel
+        // shares the Ask PDF sidebar's surface color.
+        let warmTint = NSView()
+        warmTint.wantsLayer = true
+        warmTint.layer?.backgroundColor = AIChatClaudePalette.sidebarWarmTint.cgColor
+        warmTint.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(warmTint, positioned: .below, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            warmTint.topAnchor.constraint(equalTo: topAnchor),
+            warmTint.bottomAnchor.constraint(equalTo: bottomAnchor),
+            warmTint.leadingAnchor.constraint(equalTo: leadingAnchor),
+            warmTint.trailingAnchor.constraint(equalTo: trailingAnchor)
+        ])
+
         modeControl.selectedSegment = 0
         modeControl.controlSize = .small
         modeControl.selectedSegmentBezelColor = AIChatClaudePalette.chipSelectedBackground

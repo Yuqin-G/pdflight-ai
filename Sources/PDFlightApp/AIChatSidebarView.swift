@@ -94,7 +94,10 @@ enum AIChatClaudePalette {
     static let userBubble = dynamic(rgb(240, 238, 230), rgb(255, 255, 255, alpha: 0.07))
     static let composerCard = dynamic(.white, rgb(26, 26, 25))
     static let hairline = dynamic(rgb(0, 0, 0, alpha: 0.08), rgb(255, 255, 255, alpha: 0.10))
-    static let vibrantFade = dynamic(rgb(245, 245, 243, alpha: 0.97), rgb(31, 31, 29, alpha: 0.95))
+    static let sidebarBackground = dynamic(rgb(250, 248, 245), rgb(30, 28, 26))
+    /// Translucent warm wash laid over `.sidebar` material so the
+    /// navigation sidebar shares the same clay-tinted surface.
+    static let sidebarWarmTint = dynamic(rgb(250, 247, 242, alpha: 0.62), rgb(30, 28, 26, alpha: 0.55))
     static let chipSelectedBackground = dynamic(rgb(251, 243, 239), rgb(204, 107, 73, alpha: 0.18))
     static let chipHover = dynamic(rgb(0, 0, 0, alpha: 0.045), rgb(255, 255, 255, alpha: 0.06))
     static let selectionFill = dynamic(rgb(234, 230, 220), rgb(255, 255, 255, alpha: 0.09))
@@ -111,7 +114,7 @@ extension NSFont {
 }
 
 @MainActor
-final class AIChatSidebarView: NSVisualEffectView {
+final class AIChatSidebarView: NSView {
     var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool) -> Void)?
     var onConfigure: (() -> Void)?
     var onNewConversation: (() -> Void)?
@@ -606,9 +609,8 @@ final class AIChatSidebarView: NSVisualEffectView {
     }
 
     private func configure() {
-        material = .sidebar
-        blendingMode = .withinWindow
-        state = .active
+        wantsLayer = true
+        layer?.backgroundColor = AIChatClaudePalette.sidebarBackground.cgColor
         translatesAutoresizingMaskIntoConstraints = false
         resizeHandle.onDrag = { [weak self] delta in self?.onResizeBy?(delta) }
         resizeHandle.onDragEnded = { [weak self] in self?.onResizeEnded?() }
@@ -1508,7 +1510,7 @@ private final class AIFadeOverlayView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        let base = AIChatClaudePalette.vibrantFade
+        let base = AIChatClaudePalette.sidebarBackground
         gradient.colors = [base.cgColor, base.withAlphaComponent(0).cgColor]
         gradient.locations = [0, 1]
         gradient.startPoint = CGPoint(x: 0.5, y: 1)
@@ -1531,7 +1533,7 @@ private final class AIFadeOverlayView: NSView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        let base = AIChatClaudePalette.vibrantFade
+        let base = AIChatClaudePalette.sidebarBackground
         gradient.colors = [base.cgColor, base.withAlphaComponent(0).cgColor]
     }
 
@@ -1724,7 +1726,6 @@ private final class AIChatMessageView: NSView {
         activityPanel.addSubview(activityDot)
         activityPanel.addSubview(activityLabel)
         contentView.setFontSize(fontSize)
-        contentView.usesSerifBody = isAssistant
         contentView.translatesAutoresizingMaskIntoConstraints = false
 
         // User bubbles show no header chrome at all.
@@ -1973,9 +1974,6 @@ private final class AIChatRenderedContentView: NSStackView {
     private var rawContent = ""
     private var rendersMarkdown = false
     private var bodyFontSize: CGFloat = 13.5
-    /// Assistant messages render in the serif face (Claude's signature
-    /// editorial body); user bubbles stay on the system sans face.
-    var usesSerifBody = false
     private var imageAttachments: [AIChatImageAttachment] = []
 
     override init(frame frameRect: NSRect) {
@@ -2317,9 +2315,7 @@ private final class AIChatRenderedContentView: NSStackView {
         hangingIndent: (marker: String, indent: CGFloat)? = nil
     ) -> NSAttributedString {
         let resolvedSize = fontSize
-        let bodyFont = usesSerifBody
-            ? NSFont.claudeSerif(ofSize: resolvedSize, weight: weight)
-            : NSFont.systemFont(ofSize: resolvedSize, weight: weight)
+        let bodyFont = NSFont.systemFont(ofSize: resolvedSize, weight: weight)
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = max(2, resolvedSize * 0.26)
         paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(4, resolvedSize * 0.36)
@@ -2364,9 +2360,7 @@ private final class AIChatRenderedContentView: NSStackView {
             )
         }
         if let hangingIndent {
-            let markerFont = usesSerifBody
-                ? NSFont.claudeSerif(ofSize: resolvedSize, weight: .medium)
-                : NSFont.systemFont(ofSize: resolvedSize, weight: .medium)
+            let markerFont = NSFont.systemFont(ofSize: resolvedSize, weight: .medium)
             styled.insert(
                 NSAttributedString(
                     string: "\(hangingIndent.marker)\t",
@@ -2427,9 +2421,7 @@ private final class AIChatRenderedContentView: NSStackView {
         image.accessibilityDescription = latex
         let attachment = NSTextAttachment()
         attachment.image = image
-        let bodyFont = usesSerifBody
-            ? NSFont.claudeSerif(ofSize: fontSize)
-            : NSFont.systemFont(ofSize: fontSize)
+        let bodyFont = NSFont.systemFont(ofSize: fontSize)
         attachment.bounds = NSRect(
             x: 0,
             y: floor((bodyFont.capHeight - imageSize.height) / 2),
@@ -2453,9 +2445,7 @@ private final class AIChatRenderedContentView: NSStackView {
             let isCode = rawValue & 4 != 0
             var font = isCode
                 ? NSFont.monospacedSystemFont(ofSize: baseSize * 0.90, weight: .regular)
-                : usesSerifBody
-                    ? NSFont.claudeSerif(ofSize: baseSize, weight: isStrong ? .semibold : baseWeight)
-                    : NSFont.systemFont(ofSize: baseSize, weight: isStrong ? .semibold : baseWeight)
+                : NSFont.systemFont(ofSize: baseSize, weight: isStrong ? .semibold : baseWeight)
             if isItalic,
                let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) as NSFont? {
                 font = italic
