@@ -1980,7 +1980,7 @@ private final class AIChatRenderedContentView: NSStackView {
         super.init(frame: frameRect)
         orientation = .vertical
         alignment = .leading
-        spacing = 5
+        spacing = 7
     }
 
     @available(*, unavailable)
@@ -2128,30 +2128,30 @@ private final class AIChatRenderedContentView: NSStackView {
     private func add(_ block: AIChatMarkdownBlock) {
         switch block {
         case let .heading(level, text):
-            let scale: CGFloat = switch level {
-            case 1: 1.18
-            case 2: 1.10
-            default: 1.0
+            let size: CGFloat = switch level {
+            case 1: bodyFontSize + 4
+            case 2: bodyFontSize + 2
+            default: bodyFontSize
             }
             addRichContent(
                 text,
-                fontSize: bodyFontSize * scale,
-                weight: .semibold,
-                paragraphSpacing: 7
+                fontSize: size,
+                weight: level <= 3 ? .semibold : .regular,
+                paragraphSpacing: 9
             )
         case let .paragraph(text):
             addRichContent(text)
         case let .unorderedList(items):
             let indent = listItemIndent(marker: "•")
             for item in items {
-                addRichContent(item, paragraphSpacing: 2, hangingIndent: ("•", indent))
+                addRichContent(item, paragraphSpacing: 3, hangingIndent: ("•", indent))
             }
         case let .orderedList(start, items):
             for (offset, item) in items.enumerated() {
                 let marker = "\(start + offset)."
                 addRichContent(
                     item,
-                    paragraphSpacing: 2,
+                    paragraphSpacing: 3,
                     hangingIndent: (marker, listItemIndent(marker: marker))
                 )
             }
@@ -2317,8 +2317,8 @@ private final class AIChatRenderedContentView: NSStackView {
         let resolvedSize = fontSize
         let bodyFont = NSFont.systemFont(ofSize: resolvedSize, weight: weight)
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = max(2, resolvedSize * 0.26)
-        paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(4, resolvedSize * 0.36)
+        paragraphStyle.lineSpacing = max(3, resolvedSize * 0.42)
+        paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(5, resolvedSize * 0.5)
         if let hangingIndent {
             paragraphStyle.headIndent = hangingIndent.indent
             paragraphStyle.firstLineHeadIndent = 0
@@ -2364,7 +2364,7 @@ private final class AIChatRenderedContentView: NSStackView {
             styled.insert(
                 NSAttributedString(
                     string: "\(hangingIndent.marker)\t",
-                    attributes: [.font: markerFont, .foregroundColor: NSColor.secondaryLabelColor]
+                    attributes: [.font: markerFont, .foregroundColor: NSColor.tertiaryLabelColor]
                 ),
                 at: 0
             )
@@ -2461,10 +2461,7 @@ private final class AIChatRenderedContentView: NSStackView {
         }
         value.enumerateAttribute(.link, in: fullRange) { link, range, _ in
             guard link != nil else { return }
-            value.addAttributes([
-                .foregroundColor: NSColor.linkColor,
-                .underlineStyle: NSUnderlineStyle.single.rawValue
-            ], range: range)
+            value.addAttribute(.foregroundColor, value: NSColor.linkColor, range: range)
         }
     }
 
