@@ -69,12 +69,34 @@ enum AIChatActivityPhase: Equatable {
     fileprivate var color: NSColor {
         switch self {
         case .ready, .completed: .systemGreen
-        case .loading, .preparing, .uploading, .waiting, .answering: .controlAccentColor
+        case .loading, .preparing, .uploading, .waiting, .answering: AIChatClaudePalette.clay
         case .thinking: .systemOrange
         case .stopped: .secondaryLabelColor
         case .failed: .systemRed
         }
     }
+}
+
+/// Claude-style warm palette (open-claude-ui tokens): terracotta clay
+/// accents on warm neutrals instead of the cool system accent.
+enum AIChatClaudePalette {
+    private static func dynamic(_ light: NSColor, _ dark: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        }
+    }
+
+    static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, alpha: CGFloat = 1) -> NSColor {
+        NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: alpha)
+    }
+
+    static let clay = dynamic(rgb(217, 119, 87), rgb(204, 107, 73))       // #d97757 / #cc6b49
+    static let userBubble = dynamic(rgb(240, 238, 230), rgb(255, 255, 255, alpha: 0.07))
+    static let composerCard = dynamic(.white, rgb(26, 26, 25))
+    static let hairline = dynamic(rgb(0, 0, 0, alpha: 0.08), rgb(255, 255, 255, alpha: 0.10))
+    static let sidebarBackground = dynamic(rgb(252, 252, 251), .windowBackgroundColor)
+    static let chipSelectedBackground = dynamic(rgb(251, 243, 239), rgb(204, 107, 73, alpha: 0.18))
+    static let chipHover = dynamic(rgb(0, 0, 0, alpha: 0.045), rgb(255, 255, 255, alpha: 0.06))
 }
 
 @MainActor
@@ -469,8 +491,7 @@ final class AIChatSidebarView: NSView {
     func currentPDFAttachmentIsVisuallyEmphasizedForLayoutCheck() -> Bool {
         attachPDFButton.state == .on
             && attachPDFButton.title == "PDF"
-            && attachPDFButton.contentTintColor?.isEqual(NSColor.controlAccentColor) == true
-            && attachPDFButton.layer?.borderWidth == 1
+            && attachPDFButton.contentTintColor?.isEqual(AIChatClaudePalette.clay) == true
             && attachPDFButton.layer?.backgroundColor != nil
     }
 
@@ -565,7 +586,7 @@ final class AIChatSidebarView: NSView {
 
     private func configure() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.backgroundColor = AIChatClaudePalette.sidebarBackground.cgColor
         translatesAutoresizingMaskIntoConstraints = false
         resizeHandle.onDrag = { [weak self] delta in self?.onResizeBy?(delta) }
         resizeHandle.onDragEnded = { [weak self] in self?.onResizeEnded?() }
@@ -674,11 +695,11 @@ final class AIChatSidebarView: NSView {
         queueContainer.addSubview(queueScrollView)
 
         composerContainer.wantsLayer = true
-        composerContainer.layer?.cornerRadius = 13
+        composerContainer.layer?.cornerRadius = 16
         composerContainer.layer?.cornerCurve = .continuous
         composerContainer.layer?.borderWidth = 1
-        composerContainer.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.42).cgColor
-        composerContainer.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.9).cgColor
+        composerContainer.layer?.borderColor = AIChatClaudePalette.hairline.cgColor
+        composerContainer.layer?.backgroundColor = AIChatClaudePalette.composerCard.cgColor
         composerContainer.translatesAutoresizingMaskIntoConstraints = false
 
         composer.font = .systemFont(ofSize: 13)
@@ -744,7 +765,7 @@ final class AIChatSidebarView: NSView {
         sendButton.wantsLayer = true
         sendButton.layer?.cornerRadius = 11
         sendButton.layer?.cornerCurve = .continuous
-        sendButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        sendButton.layer?.backgroundColor = AIChatClaudePalette.clay.cgColor
         sendButton.contentTintColor = .white
         sendButton.keyEquivalent = "\r"
         sendButton.action = #selector(sendPressed(_:))
@@ -931,8 +952,8 @@ final class AIChatSidebarView: NSView {
         let focused = composerContainer.window?.firstResponder === composer
         composerContainer.layer?.borderColor = (
             focused
-                ? NSColor.controlAccentColor.withAlphaComponent(0.55)
-                : NSColor.separatorColor.withAlphaComponent(0.42)
+                ? AIChatClaudePalette.clay.withAlphaComponent(0.7)
+                : AIChatClaudePalette.hairline
         ).cgColor
     }
 
@@ -988,7 +1009,7 @@ final class AIChatSidebarView: NSView {
 
     private func setCurrentPDFAttachmentSelected(_ selected: Bool) {
         attachPDFButton.state = selected ? .on : .off
-        let foreground: NSColor = selected ? .controlAccentColor : .secondaryLabelColor
+        let foreground: NSColor = selected ? AIChatClaudePalette.clay : .secondaryLabelColor
         attachPDFButton.bezelColor = nil
         attachPDFButton.contentTintColor = foreground
         attachPDFButton.attributedTitle = NSAttributedString(
@@ -1001,12 +1022,10 @@ final class AIChatSidebarView: NSView {
         )
         attachPDFButton.layer?.backgroundColor = (
             selected
-                ? NSColor.controlAccentColor.withAlphaComponent(0.13)
+                ? AIChatClaudePalette.chipSelectedBackground
                 : NSColor.clear
         ).cgColor
-        attachPDFButton.layer?.borderWidth = selected ? 1 : 0
-        attachPDFButton.layer?.borderColor = NSColor.controlAccentColor
-            .withAlphaComponent(0.16).cgColor
+        attachPDFButton.layer?.borderWidth = 0
         attachPDFButton.toolTip = selected
             ? "Current PDF will be uploaded with the next message"
             : "Attach the current PDF to the next message"
@@ -1359,7 +1378,7 @@ private final class AIChatSelectionButton: NSButton {
     }
 
     private func updateAppearance() {
-        let foreground: NSColor = isSelectedValue ? .controlAccentColor : .secondaryLabelColor
+        let foreground: NSColor = isSelectedValue ? AIChatClaudePalette.clay : .secondaryLabelColor
         attributedTitle = NSAttributedString(
             string: title,
             attributes: [
@@ -1369,13 +1388,12 @@ private final class AIChatSelectionButton: NSButton {
         )
         layer?.backgroundColor = (
             isSelectedValue
-                ? NSColor.controlAccentColor.withAlphaComponent(0.13)
+                ? AIChatClaudePalette.chipSelectedBackground
                 : isHovered
-                    ? NSColor.controlBackgroundColor.withAlphaComponent(0.9)
+                    ? AIChatClaudePalette.chipHover
                     : NSColor.clear
         ).cgColor
-        layer?.borderWidth = isSelectedValue ? 1 : 0
-        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
+        layer?.borderWidth = 0
     }
 }
 
@@ -1468,28 +1486,28 @@ private final class AIChatMessageView: NSView {
         translatesAutoresizingMaskIntoConstraints = false
 
         card.wantsLayer = true
-        card.layer?.cornerRadius = 12
+        card.layer?.cornerRadius = 14
         card.layer?.cornerCurve = .continuous
-        // Coding-agent style: user gets a soft accent bubble, assistant
+        // Claude style: user gets a warm neutral bubble, assistant
         // replies sit directly on the sidebar with no card chrome.
         card.layer?.borderWidth = 0
         card.layer?.backgroundColor = (
             isUser
-                ? NSColor.controlAccentColor.withAlphaComponent(0.11)
+                ? AIChatClaudePalette.userBubble
                 : NSColor.clear
         ).cgColor
         card.translatesAutoresizingMaskIntoConstraints = false
 
         roleBadge.wantsLayer = true
         roleBadge.layer?.cornerRadius = 5
-        roleBadge.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.10).cgColor
+        roleBadge.layer?.backgroundColor = AIChatClaudePalette.chipSelectedBackground.cgColor
         roleBadge.translatesAutoresizingMaskIntoConstraints = false
 
         roleIcon.image = NSImage(
             systemSymbolName: "sparkles",
             accessibilityDescription: "Assistant"
         )
-        roleIcon.contentTintColor = .controlAccentColor
+        roleIcon.contentTintColor = AIChatClaudePalette.clay
         roleIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
         roleIcon.translatesAutoresizingMaskIntoConstraints = false
         roleBadge.addSubview(roleIcon)
