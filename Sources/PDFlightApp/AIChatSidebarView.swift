@@ -177,7 +177,7 @@ final class AIChatSidebarView: NSView {
     private var selectedPromptPreset = AIPromptPreset.defaultForNewConversation
     private var messageFontSize: CGFloat = {
         let stored = UserDefaults.standard.double(forKey: "reader.aiChatFontSize")
-        return stored.isFinite && stored >= 11 && stored <= 24 ? stored : 13.5
+        return stored.isFinite && stored >= 11 && stored <= 24 ? stored : 14
     }()
     private var replyGestureZoomEnabled = false
     private var isApplyingSelection = false
@@ -689,7 +689,7 @@ final class AIChatSidebarView: NSView {
         messageStack.orientation = .vertical
         messageStack.alignment = .leading
         messageStack.spacing = 14
-        messageStack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 14)
+        messageStack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         messageStack.translatesAutoresizingMaskIntoConstraints = false
         messageScrollView.documentView = messageStack
 
@@ -1973,7 +1973,7 @@ private final class AIChatMessageView: NSView {
 private final class AIChatRenderedContentView: NSStackView {
     private var rawContent = ""
     private var rendersMarkdown = false
-    private var bodyFontSize: CGFloat = 13.5
+    private var bodyFontSize: CGFloat = 14
     private var imageAttachments: [AIChatImageAttachment] = []
 
     override init(frame frameRect: NSRect) {
@@ -2144,14 +2144,14 @@ private final class AIChatRenderedContentView: NSStackView {
         case let .unorderedList(items):
             let indent = listItemIndent(marker: "•")
             for item in items {
-                addRichContent(item, paragraphSpacing: 3, hangingIndent: ("•", indent))
+                addRichContent(item, paragraphSpacing: 1, hangingIndent: ("•", indent))
             }
         case let .orderedList(start, items):
             for (offset, item) in items.enumerated() {
                 let marker = "\(start + offset)."
                 addRichContent(
                     item,
-                    paragraphSpacing: 3,
+                    paragraphSpacing: 1,
                     hangingIndent: (marker, listItemIndent(marker: marker))
                 )
             }
