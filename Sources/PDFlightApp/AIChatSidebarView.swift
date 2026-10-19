@@ -141,9 +141,9 @@ final class AIChatSidebarView: NSView {
     private let composer = AIChatComposerTextView(frame: .zero)
     private let promptModeScrollView = NSScrollView()
     private let promptModeStack = NSStackView()
-    private let promptManageButton = NSButton()
+    private let promptManageButton = AIGhostButton()
     private let attachPDFButton = NSButton()
-    private let attachImageButton = NSButton()
+    private let attachImageButton = AIGhostButton()
     private let sendButton = NSButton()
     private let cancelButton = NSButton()
     private let activityContainer = NSView()
@@ -152,6 +152,7 @@ final class AIChatSidebarView: NSView {
     private let activityTitleLabel = NSTextField(labelWithString: "Ready")
     private let statusLabel = NSTextField(labelWithString: "No prompt sends only the visible chat.")
     private let resizeHandle = AISidebarResizeHandle()
+    private let topFadeView = AIFadeOverlayView()
     private var messageViews: [String: AIChatMessageView] = [:]
     private var emptyStateView: NSView?
     private var conversationIDs: [String] = []
@@ -280,6 +281,17 @@ final class AIChatSidebarView: NSView {
         messageViews[message.id] = view
         messageStack.addArrangedSubview(view)
         view.widthAnchor.constraint(equalTo: messageStack.widthAnchor, constant: -32).isActive = true
+        view.wantsLayer = true
+        view.layer?.opacity = 0
+        view.layer?.transform = CATransform3DMakeTranslation(0, 10, 0)
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0.42
+        NSAnimationContext.current.timingFunction = CAMediaTimingFunction(
+            controlPoints: 0.16, 1, 0.3, 1
+        )
+        view.layer?.opacity = 1
+        view.layer?.transform = CATransform3DIdentity
+        NSAnimationContext.endGrouping()
         scrollToBottom()
     }
 
@@ -314,13 +326,10 @@ final class AIChatSidebarView: NSView {
         activityTitleLabel.textColor = (phase.isActive || phase == .failed) ? phase.color : .labelColor
         statusLabel.stringValue = detail
         activityDot.color = phase.color
-        activityDot.isHidden = phase.isActive
-        activityIndicator.isHidden = !phase.isActive
-        if phase.isActive {
-            activityIndicator.startAnimation(nil)
-        } else {
-            activityIndicator.stopAnimation(nil)
-        }
+        activityDot.isHidden = false
+        activityDot.breathing = phase.isActive
+        activityIndicator.isHidden = true
+        activityIndicator.stopAnimation(nil)
         activityContainer.setAccessibilityLabel("AI activity")
         activityContainer.setAccessibilityValue("\(phase.title). \(detail)")
     }
@@ -512,6 +521,7 @@ final class AIChatSidebarView: NSView {
         composerAttachments.removeAll()
         rebuildComposerAttachments()
         composer.needsDisplay = true
+        updateSendButtonState()
     }
 
     func addImageAttachmentForLayoutCheck(_ attachment: AIChatImageAttachment) {
@@ -717,9 +727,11 @@ final class AIChatSidebarView: NSView {
         composer.textContainer?.widthTracksTextView = true
         composer.onSubmit = { [weak self] in self?.submitComposer() }
         composer.onFocusChange = { [weak self] in self?.updateComposerFocusRing() }
+        composer.onTextChange = { [weak self] in self?.updateSendButtonState() }
         composer.onPasteboardImages = { [weak self] pasteboard in
             self?.addImages(from: pasteboard) ?? false
         }
+        composer.insertionPointColor = AIChatClaudePalette.clay
         composerScrollView.documentView = composer
         composerScrollView.hasVerticalScroller = true
         composerScrollView.autohidesScrollers = true
@@ -765,7 +777,7 @@ final class AIChatSidebarView: NSView {
         sendButton.wantsLayer = true
         sendButton.layer?.cornerRadius = 11
         sendButton.layer?.cornerCurve = .continuous
-        sendButton.layer?.backgroundColor = AIChatClaudePalette.clay.cgColor
+        sendButton.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
         sendButton.contentTintColor = .white
         sendButton.keyEquivalent = "\r"
         sendButton.action = #selector(sendPressed(_:))
@@ -842,7 +854,11 @@ final class AIChatSidebarView: NSView {
         addSubview(queueContainer)
         addSubview(composerContainer)
         addSubview(activityContainer)
+        topFadeView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(topFadeView, positioned: .above, relativeTo: messageScrollView)
         addSubview(resizeHandle, positioned: .above, relativeTo: nil)
+        updateComposerFocusRing()
+        updateSendButtonState()
 
         attachmentHeightConstraint = attachmentScrollView.heightAnchor.constraint(equalToConstant: 0)
         queueHeightConstraint = queueContainer.heightAnchor.constraint(equalToConstant: 0)
@@ -917,6 +933,10 @@ final class AIChatSidebarView: NSView {
             activityDot.widthAnchor.constraint(equalToConstant: 7),
             activityDot.heightAnchor.constraint(equalToConstant: 7),
             activityTitleLabel.leadingAnchor.constraint(equalTo: activityIndicator.trailingAnchor, constant: 7),
+            topFadeView.topAnchor.constraint(equalTo: messageScrollView.topAnchor),
+            topFadeView.leadingAnchor.constraint(equalTo: messageScrollView.leadingAnchor),
+            topFadeView.trailingAnchor.constraint(equalTo: messageScrollView.trailingAnchor),
+            topFadeView.heightAnchor.constraint(equalToConstant: 22),
             activityTitleLabel.centerYAnchor.constraint(equalTo: activityContainer.centerYAnchor),
             statusLabel.leadingAnchor.constraint(equalTo: activityTitleLabel.trailingAnchor, constant: 6),
             statusLabel.trailingAnchor.constraint(equalTo: activityContainer.trailingAnchor, constant: -9),
@@ -954,6 +974,18 @@ final class AIChatSidebarView: NSView {
             focused
                 ? AIChatClaudePalette.clay.withAlphaComponent(0.7)
                 : AIChatClaudePalette.hairline
+        ).cgColor
+        composerContainer.layer?.shadowColor = AIChatClaudePalette.clay.cgColor
+        composerContainer.layer?.shadowOpacity = focused ? 0.16 : 0.05
+        composerContainer.layer?.shadowRadius = focused ? 7 : 4
+        composerContainer.layer?.shadowOffset = NSSize(width: 0, height: -1)
+        composerContainer.layer?.masksToBounds = false
+    }
+
+    private func updateSendButtonState() {
+        let ready = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        sendButton.layer?.backgroundColor = (
+            ready ? AIChatClaudePalette.clay : .quaternaryLabelColor
         ).cgColor
     }
 
@@ -1438,10 +1470,107 @@ private final class AIActivityDotView: NSView {
         didSet { needsDisplay = true }
     }
 
+    /// Claude-style 2.4s breathing pulse while a generation is active.
+    var breathing = false {
+        didSet { updateBreathing() }
+    }
+
+    private func updateBreathing() {
+        layer?.removeAnimation(forKey: "breathe")
+        guard breathing else { layer?.opacity = 1; return }
+        wantsLayer = true
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1
+        pulse.toValue = 0.3
+        pulse.duration = 1.2
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer?.add(pulse, forKey: "breathe")
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         color.setFill()
         NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5)).fill()
+    }
+}
+
+/// Non-interactive gradient overlay fading the top edge of the message
+/// stream into the sidebar background (Claude scroll-fade effect).
+private final class AIFadeOverlayView: NSView {
+    private let gradient = CAGradientLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        let base = AIChatClaudePalette.sidebarBackground
+        gradient.colors = [base.cgColor, base.withAlphaComponent(0).cgColor]
+        gradient.locations = [0, 1]
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
+        layer?.addSublayer(gradient)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.frame = bounds
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        let base = AIChatClaudePalette.sidebarBackground
+        gradient.colors = [base.cgColor, base.withAlphaComponent(0).cgColor]
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+/// Ghost toolbar icon: plain symbol with a subtle warm hover fill.
+private final class AIGhostButton: NSButton {
+    private var hoverArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = AIChatClaudePalette.chipHover.cgColor
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = nil
     }
 }
 
@@ -1793,14 +1922,11 @@ private final class AIChatMessageView: NSView {
         activityLabel.stringValue = phase.title
         activityLabel.textColor = phase == .failed ? .systemRed : .secondaryLabelColor
         activityDot.color = phase.color
-        activitySpinner.isHidden = !phase.isActive
-        activityDot.isHidden = phase.isActive
+        activitySpinner.isHidden = true
+        activitySpinner.stopAnimation(nil)
+        activityDot.isHidden = false
+        activityDot.breathing = phase.isActive
         deleteMessageButton.isEnabled = !phase.isActive
-        if phase.isActive {
-            activitySpinner.startAnimation(nil)
-        } else {
-            activitySpinner.stopAnimation(nil)
-        }
         activityPanel.setAccessibilityLabel("Model activity")
         activityPanel.setAccessibilityValue(phase.title)
     }
@@ -2628,6 +2754,7 @@ private final class AIChatTableGridView: NSGridView {
 private final class AIChatComposerTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onFocusChange: (() -> Void)?
+    var onTextChange: (() -> Void)?
     var onPasteboardImages: ((NSPasteboard) -> Bool)?
     var pasteboardProvider: () -> NSPasteboard = { .general }
     var placeholderString = "" {
@@ -2652,6 +2779,7 @@ private final class AIChatComposerTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
+        onTextChange?()
     }
 
     override func becomeFirstResponder() -> Bool {
