@@ -100,6 +100,16 @@ enum AIChatClaudePalette {
     static let selectionFill = dynamic(rgb(234, 230, 220), rgb(255, 255, 255, alpha: 0.09))
 }
 
+extension NSFont {
+    /// Editorial serif face (New York) used for titles, matching the
+    /// serif display style of the Claude design language.
+    static func claudeSerif(ofSize size: CGFloat, weight: NSFont.Weight = .medium) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        guard let serif = base.fontDescriptor.withDesign(.serif) else { return base }
+        return NSFont(descriptor: serif, size: size) ?? base
+    }
+}
+
 @MainActor
 final class AIChatSidebarView: NSView {
     var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool) -> Void)?
@@ -606,7 +616,7 @@ final class AIChatSidebarView: NSView {
         resizeHandle.setAccessibilityRole(.splitter)
         resizeHandle.setAccessibilityLabel("Resize Ask PDF sidebar")
 
-        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.font = .claudeSerif(ofSize: 18, weight: .semibold)
         titleLabel.textColor = .labelColor
         titleLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
 
@@ -1199,7 +1209,7 @@ final class AIChatSidebarView: NSView {
     private func installEmptyState() {
         guard emptyStateView == nil else { return }
         let title = NSTextField(labelWithString: "Read this paper with AI")
-        title.font = .systemFont(ofSize: 15, weight: .medium)
+        title.font = .claudeSerif(ofSize: 17, weight: .medium)
         title.textColor = .labelColor
         let detail = NSTextField(wrappingLabelWithString: "No hidden prompt or PDF pages are sent unless you select them. Use the PDF button to upload this paper once.")
         detail.font = .systemFont(ofSize: 12)
