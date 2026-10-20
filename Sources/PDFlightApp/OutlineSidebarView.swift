@@ -17,8 +17,8 @@ final class OutlineSidebarView: NSVisualEffectView, NSOutlineViewDataSource, NSO
         state = .active
 
         let heading = NSTextField(labelWithString: "Outline")
-        heading.font = .claudeSerif(ofSize: 14, weight: .medium)
-        heading.textColor = .labelColor
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        heading.textColor = .secondaryLabelColor
         heading.translatesAutoresizingMaskIntoConstraints = false
 
         let column = NSTableColumn(identifier: .outlineColumn)

@@ -35,7 +35,7 @@ final class QuickOpenPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource,
         searchField.focusRingType = .none
         searchField.isBezeled = false
         searchField.drawsBackground = false
-        searchField.font = .claudeSerif(ofSize: 19, weight: .regular)
+        searchField.font = .systemFont(ofSize: 18, weight: .light)
         searchField.delegate = self
 
         scrollView.borderType = .noBorder
