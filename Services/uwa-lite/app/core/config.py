@@ -222,7 +222,7 @@ class AppConfig:
     @staticmethod
     def get_browser_port() -> int:
         # 修复：改用安全解析，空值/非法值回落默认端口
-        return AppConfig._env_int("BROWSER_PORT", 9222)
+        return AppConfig._env_int("BROWSER_PORT", 9333)
     
     # ===== Dashboard 配置 =====
     @staticmethod
@@ -376,7 +376,7 @@ class BrowserConstants:
     
     # ===== 默认值字典 =====
     _DEFAULTS = {
-        'DEFAULT_PORT': 9222,
+        'DEFAULT_PORT': 9333,
         'CONNECTION_TIMEOUT': 10,
         'MAX_REQUEST_EXECUTE_TIME_SEC': 300.0,
         'STEALTH_DELAY_MIN': 0.03,
@@ -463,7 +463,7 @@ class BrowserConstants:
     # ===== 类属性（会被配置文件覆盖）=====
     
     # 连接配置
-    DEFAULT_PORT = 9222
+    DEFAULT_PORT = 9333
     CONNECTION_TIMEOUT = 10
     MAX_REQUEST_EXECUTE_TIME_SEC = 300.0
     

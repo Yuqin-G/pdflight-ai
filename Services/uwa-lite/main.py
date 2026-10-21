@@ -63,7 +63,7 @@ def _patch_browser_connect() -> None:
     original = BrowserConnectionMixin._connect
 
     def _connect_with_ensure(self):
-        port = int(getattr(self, "port", None) or os.environ.get("BROWSER_PORT", 9222))
+        port = int(getattr(self, "port", None) or os.environ.get("BROWSER_PORT", 9333))
         if not browser_ensure.debug_port_alive(port):
             logger.info(f"[browser] 调试端口 {port} 无响应，拉起受控浏览器")
             if not browser_ensure.ensure_browser_running(port, _profile_dir()):

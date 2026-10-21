@@ -11,3 +11,4 @@ config/request_history.json
 config/model_name_overrides.local.json
 temp/
 chrome_profile/
+runtime/
