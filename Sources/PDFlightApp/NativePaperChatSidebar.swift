@@ -11,6 +11,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard AIChatRenderedContentView.harnessLinkHitTestForLayoutCheck() else {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "主题链接必须保持可点击"])
         }
+        let markdown = AIChatRenderedContentView(); markdown.useHarnessTypography()
+        markdown.setContent("**论文中的描述**：\n在论文中提到。", renderMarkdown: true)
+        guard markdown.renderedTextForLayoutCheck().contains("论文中的描述： 在论文中提到。") else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 19, userInfo: [NSLocalizedDescriptionKey: "Markdown 段落中的软换行必须与 Harness 一致"])
+        }
         let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 440, height: 700))
         var savedText = ""; var savedImages: [AIChatImageAttachment] = []; var savedPDF = false
         sidebar.onDraftChange = { text, images, pdf, _, _, _ in savedText = text; savedImages = images; savedPDF = pdf }

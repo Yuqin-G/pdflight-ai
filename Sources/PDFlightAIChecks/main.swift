@@ -184,7 +184,7 @@ enum PDFlightAIChecks {
         }
         try write(["papers": [["id": "paper-1", "title": "Paper.pdf", "path": copyPDF.path]]], data.appendingPathComponent("index.json"))
         try write(["groups": [["paperId": "paper-1", "lastSessionId": "session-a", "conversations": [
-            ["sessionId": "session-a", "title": "Reading"], ["sessionId": "session-image"],
+            ["sessionId": "session-a", "title": "Li - 2025 - Paper.pdf"], ["sessionId": "session-image"],
             ["sessionId": "missing"], ["sessionId": "../escape"]
         ]]]], data.appendingPathComponent("conversations.json"))
         let archive: [String: Any] = ["sessionId": "session-a", "paperId": "paper-1", "title": "Reading", "provider": "test", "model": "sample", "status": "active", "createdAt": "2026-01-01T00:00:00.000Z", "entries": [
@@ -197,6 +197,7 @@ enum PDFlightAIChecks {
         let raw = try Data(contentsOf: archiveURL)
         let result = try HarnessChatImport.prepare(documentURL: originalPDF, dataDirectory: data, pathMappingsURL: nil)
         try check(result.paperID == "paper-1" && result.activeSessionID == "session-a", "expected the exact PDF and selected session")
+        try check(result.conversations.first?.value.title == "Paper", "imported tab titles should drop the author, year, and PDF suffix")
         try check(result.conversations.count == 1 && result.conversations[0].value.messages.map(\.content) == ["question", "answer"], "expected complete text turns")
         try check(result.conversations[0].sourceArchive == raw && result.conversations[0].provider == "test", "expected original archive and provider to be retained")
         try check(Set(result.skippedSessionIDs) == Set(["session-image", "missing", "../escape"]), "expected unsupported, absent and unsafe sessions to be reported")

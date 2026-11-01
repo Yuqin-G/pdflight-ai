@@ -2014,6 +2014,23 @@ final class AIChatRenderedContentView: NSStackView {
         render()
     }
 
+    private static func harnessSoftBreaks(_ text: String) -> String {
+        // Preserve multiline display equations for the math renderer.
+        guard !text.contains("$$"), !text.contains("\\[") else { return text }
+        let lines = text.components(separatedBy: "\n")
+        guard lines.count > 1 else { return text }
+        var result = ""
+        for index in lines.indices {
+            var line = lines[index]
+            if index < lines.count - 1 {
+                if line.hasSuffix("  ") { line.removeLast(2); result += line + "\n" }
+                else if line.hasSuffix("\\") { line.removeLast(); result += line + "\n" }
+                else { result += line + " " }
+            } else { result += line }
+        }
+        return result
+    }
+
     func renderedTextForLayoutCheck() -> String {
         textFields(in: self).map(\.stringValue).joined(separator: "\n")
     }
@@ -2158,7 +2175,7 @@ final class AIChatRenderedContentView: NSStackView {
             )
             harnessSerifHeading = false; harnessHeadingLineHeight = nil
         case let .paragraph(text):
-            addRichContent(text)
+            addRichContent(harnessTypography ? Self.harnessSoftBreaks(text) : text)
         case let .unorderedList(items):
             let indent = listItemIndent(marker: "•")
             for (index, item) in items.enumerated() {

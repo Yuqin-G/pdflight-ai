@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import PDFlightCore
 
 /// Read-only preparation of Harness paper-chat archives for a native client.
 /// The original archive is retained alongside each conversion so information
@@ -105,7 +106,9 @@ public enum HarnessChatImport {
             }
             let routeID = projection.flatMap { value in value.provider.flatMap { p in value.model.map { p + "/" + $0 } } }
                 ?? archive.provider.flatMap { provider in archive.model.map { provider + "/" + $0 } }
-            let value = AIConversation(id: entry.sessionId, title: archive.title ?? entry.title ?? paper.title,
+            let sourceTitle = entry.title ?? archive.title ?? paper.title
+            let name = sourceTitle.lowercased().hasSuffix(".pdf") ? String(sourceTitle.dropLast(4)) : sourceTitle
+            let value = AIConversation(id: entry.sessionId, title: PaperLibraryPaper.automaticDisplayAlias(for: name),
                 promptPreset: .reading, messages: messages, createdAt: created, updatedAt: updated,
                 modelRouteID: routeID, webConversationKey: archive.web?.conversationKey, webConversationURL: archive.web?.url,
                 reasoningEffort: projection?.reasoningEffort)
