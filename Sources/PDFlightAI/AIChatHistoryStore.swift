@@ -123,19 +123,21 @@ public actor AIChatHistoryStore {
         let prepared = try HarnessChatImport.prepare(documentURL: documentURL, dataDirectory: dataDirectory, pathMappingsURL: pathMappingsURL, recoveredArchivesDirectory: recoveredArchivesDirectory, projectionDirectory: projectionDirectory)
         guard prepared.paperID != nil else { return try history(for: documentURL) }
         var merged = try importHarness(prepared, for: documentURL)
+        var incompleteDraftImport = false
         if let draftDirectory, FileManager.default.fileExists(atPath: draftDirectory.path) {
             var candidates: [String: Set<Data>] = [:]
+            let relevantIDs = Set(merged.conversations.map(\.id))
             let files = try FileManager.default.contentsOfDirectory(at: draftDirectory, includingPropertiesForKeys: nil)
             for file in files where file.pathExtension == "json" {
                 guard let raw = try? Data(contentsOf: file),
                       let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
                       let drafts = object["drafts"] as? [[String: Any]] else { continue }
                 for entry in drafts {
-                    guard let id = entry["sessionId"] as? String,
+                    guard let id = entry["sessionId"] as? String, relevantIDs.contains(id),
                           let draft = entry["draft"] as? [String: Any],
                           let text = draft["text"] as? String, !text.isEmpty else { continue }
                     let referenceData = try JSONSerialization.data(withJSONObject: draft["references"] as? [Any] ?? [])
-                    guard let references = try? JSONDecoder().decode([AIChatDraftReference].self, from: referenceData) else { continue }
+                    guard let references = try? JSONDecoder().decode([AIChatDraftReference].self, from: referenceData) else { incompleteDraftImport = true; continue }
                     let source = text as NSString
                     var lastEnd = 0
                     guard references.allSatisfy({ reference in
@@ -144,7 +146,7 @@ public actor AIChatHistoryStore {
                               source.substring(with: NSRange(location: reference.offset, length: reference.length)) == reference.clipboardText else { return false }
                         lastEnd = reference.offset + reference.length
                         return true
-                    }) else { continue }
+                    }) else { incompleteDraftImport = true; continue }
                     let command = (draft["command"] as? [String: Any]).flatMap { $0["token"] as? String }.map(AIChatDraftCommand.init(token:))
                     let converted = AIChatDraft(text: text, references: references.isEmpty ? nil : references, command: command)
                     let draftEncoder = JSONEncoder(); draftEncoder.outputFormatting = [.sortedKeys]
@@ -154,6 +156,7 @@ public actor AIChatHistoryStore {
             var changed = false
             for index in merged.conversations.indices {
                 let conversation = merged.conversations[index]
+                if conversation.draft == nil, let values = candidates[conversation.id], values.count > 1 { incompleteDraftImport = true }
                 guard conversation.draft == nil, let values = candidates[conversation.id], values.count == 1,
                       let data = values.first, let draft = try? JSONDecoder().decode(AIChatDraft.self, from: data) else { continue }
                 merged.conversations[index].draft = draft
@@ -163,7 +166,7 @@ public actor AIChatHistoryStore {
         }
         // Keep retrying any sessions whose source files were incomplete or
         // unsupported; their originals remain in Harness untouched.
-        if prepared.skippedSessionIDs.isEmpty {
+        if prepared.skippedSessionIDs.isEmpty && !incompleteDraftImport {
             try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try Data("1\n".utf8).write(to: marker, options: .atomic)
         }
