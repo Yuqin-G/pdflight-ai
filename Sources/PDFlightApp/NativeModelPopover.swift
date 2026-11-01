@@ -182,19 +182,19 @@ final class NativeModelPanel: NSPanel {
         (controller as? NativeModelPopover)?.onResize = { [weak self] size in self?.position(size) }
     }
 
-    func present() {
+    func present(activate: Bool = true) {
         guard let owner, let controller = contentViewController else { return }
         _ = controller.view
         position(controller.preferredContentSize)
         owner.addChildWindow(self, ordered: .above)
-        makeKeyAndOrderFront(nil)
+        if activate { makeKeyAndOrderFront(nil) } else { orderFront(nil) }
         clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self, event.window !== self else { return event }
             let clickedAnchor = event.window === self.owner && self.anchor.map {
                 $0.bounds.contains($0.convert(event.locationInWindow, from: nil))
             } == true
             self.dismiss()
-            return clickedAnchor ? nil : event
+            return clickedAnchor && activate ? nil : event
         }
         resignObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.dismiss() }

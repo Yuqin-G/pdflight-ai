@@ -61,6 +61,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         sidebar.onSend = { _, _, _, _, paths in sentExtra = paths }
         sidebar.sendOrStop()
         guard sentExtra == [extraPath] else { throw NSError(domain: "NativePaperChatSelfCheck", code: 14, userInfo: [NSLocalizedDescriptionKey: "发送必须包含额外 PDF"]) }
+        sidebar.composer.string = "保留文字 /mod 后文"
+        sidebar.composer.setSelectedRange(NSRange(location: ("保留文字 /mod" as NSString).length, length: 0))
+        guard sidebar.slashTrigger()?.query == "mod" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 15, userInfo: [NSLocalizedDescriptionKey: "斜杠指令应识别光标前的候选"]) }
+        sidebar.consumeSlashTrigger()
+        guard sidebar.composer.string == "保留文字  后文" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 16, userInfo: [NSLocalizedDescriptionKey: "执行指令必须保留其前后的草稿"]) }
         let pdfMessage = AIChatMessage(role: .user, content: "阅读附件", pdfAttachmentName: "paper.pdf")
         sidebar.append(pdfMessage)
         let row = sidebar.messageRows[pdfMessage.id] as? NSStackView
@@ -141,6 +146,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var webConversationURL: URL?
     private var modelPanel: NativeModelPanel?
     private var composerMenuPanel: NativeModelPanel?
+    private var slashMenuOpen = false
+    private var dismissedSlashLocation: Int?
     private var chatZoom: CGFloat = {
         let value = UserDefaults.standard.double(forKey: "reader.nativePaperChatZoom")
         return value >= 0.8 && value <= 2.4 ? value : 1
@@ -497,14 +504,15 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard composer.string.isEmpty else { return }; composer.string = text; self.attachments = attachments; includePDF = includeCurrentPDF; self.additionalPDFPaths = additionalPDFPaths; updateAttachments(); draftChanged()
     }
     func restoreDraft(_ text: String, attachments: [AIChatImageAttachment], includePDF: Bool, additionalPDFPaths: [String] = []) {
+        composerMenuPanel?.dismiss(); dismissedSlashLocation = nil
         suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; self.additionalPDFPaths = additionalPDFPaths; updateAttachments(); resizeComposer(); updateSendButton(); suppressDraftCallback = false
     }
     func insertPrompt(_ text: String) { guard !text.isEmpty else { return }; composer.string = text + (composer.string.isEmpty ? "" : "\n\n" + composer.string); draftChanged(); focusComposer() }
     func insertQuote(_ text: String) { guard !text.isEmpty else { return }; composer.string = text + composer.string; draftChanged(); focusComposer() }
     func focusComposer() { window?.makeFirstResponder(composer) }
-    func clearComposer() { composer.string = ""; attachments = []; includePDF = false; additionalPDFPaths = []; updateAttachments(); draftChanged() }
+    func clearComposer() { composerMenuPanel?.dismiss(); dismissedSlashLocation = nil; composer.string = ""; attachments = []; includePDF = false; additionalPDFPaths = []; updateAttachments(); draftChanged() }
     func presentHistoryMenu(_ menu: NSMenu) { menu.popUp(positioning: nil, at: .zero, in: recordButton) }
-    func textDidChange(_ notification: Notification) { composer.needsDisplay = true; resizeComposer(); draftChanged() }
+    func textDidChange(_ notification: Notification) { composer.needsDisplay = true; resizeComposer(); draftChanged(); updateSlashMenu() }
     private func updateComposerTypography() {
         let font = NSFont.systemFont(ofSize: 14 * chatZoom)
         let style = NSMutableParagraphStyle(); style.minimumLineHeight = 24 * chatZoom
@@ -519,6 +527,13 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         composerHeight?.constant = min(336 * chatZoom, max(36 * chatZoom, ceil(height)))
     }
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if slashMenuOpen, let event = NSApp.currentEvent, let menu = composerMenuPanel?.contentViewController as? NativeComposerMenu {
+            if selector == #selector(NSResponder.cancelOperation(_:)) {
+                dismissedSlashLocation = slashTrigger()?.range.location
+                composerMenuPanel?.dismiss(); return true
+            }
+            if !(event.modifierFlags.contains(.shift) && (event.keyCode == 36 || event.keyCode == 76)), menu.handleKey(event) { return true }
+        }
         if selector == #selector(NSResponder.insertNewline(_:)),
            !(NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false) {
             submitDraft(); return true
@@ -625,21 +640,58 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         submitDraft()
     }
     private func submitDraft() { let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty else { return }; onSend?(text, attachments, selectedPreset, includePDF, additionalPDFPaths) }
-    @objc private func attach() {
+    @objc private func attach() { presentComposerMenu(query: nil) }
+    private func slashTrigger() -> (range: NSRange, query: String)? {
+        let selection = composer.selectedRange()
+        let value = composer.string as NSString
+        guard selection.length == 0, selection.location <= value.length else { return nil }
+        let prefix = value.substring(to: selection.location)
+        guard let regex = try? NSRegularExpression(pattern: "(?:^|\\s)/([\\p{L}\\p{N}_-]*)$"),
+              let match = regex.firstMatch(in: prefix, range: NSRange(location: 0, length: (prefix as NSString).length)) else { return nil }
+        let query = (prefix as NSString).substring(with: match.range(at: 1))
+        return (NSRange(location: match.range(at: 1).location - 1, length: match.range(at: 1).length + 1), query)
+    }
+    private func updateSlashMenu() {
+        guard let trigger = slashTrigger() else {
+            dismissedSlashLocation = nil
+            if slashMenuOpen { composerMenuPanel?.dismiss() }
+            return
+        }
+        guard dismissedSlashLocation != trigger.range.location else { return }
+        if slashMenuOpen { composerMenuPanel?.dismiss() }
+        presentComposerMenu(query: trigger.query)
+    }
+    private func consumeSlashTrigger() {
+        guard let trigger = slashTrigger(), composer.shouldChangeText(in: trigger.range, replacementString: "") else { return }
+        composer.textStorage?.replaceCharacters(in: trigger.range, with: "")
+        composer.setSelectedRange(NSRange(location: trigger.range.location, length: 0))
+        composer.didChangeText()
+    }
+    private func presentComposerMenu(query: String?) {
         if composerMenuPanel != nil { composerMenuPanel?.dismiss(); return }
         guard let parent = window else { return }
-        let add: [NativeComposerMenu.Item] = [
-            .init(title: "文件", token: "file", detail: "添加图片或 PDF", symbol: "paperclip", action: { [weak self] in self?.addFile() }),
-            .init(title: includePDF ? "移除当前 PDF" : "当前 PDF", token: "", detail: "", symbol: "doc", action: { [weak self] in self?.togglePDF() })
+        let fromSlash = query != nil
+        let prepare: (@escaping @MainActor () -> Void) -> @MainActor () -> Void = { [weak self] action in
+            { [weak self] in if fromSlash { self?.consumeSlashTrigger() }; action() }
+        }
+        var add: [NativeComposerMenu.Item] = [
+            .init(title: "文件", token: "file", detail: "添加图片或 PDF", symbol: "paperclip", action: prepare { [weak self] in self?.addFile(); self?.focusComposer() }),
+            .init(title: includePDF ? "移除当前 PDF" : "当前 PDF", token: "", detail: "", symbol: "doc", action: prepare { [weak self] in self?.togglePDF(); self?.focusComposer() })
         ]
-        let commands: [NativeComposerMenu.Item] = [
-            .init(title: "权限", token: "permission", detail: "切换权限预设", symbol: "exclamationmark.shield", action: { [weak self] in self?.configureAccess() }),
-            .init(title: "模型", token: "model", detail: "选择本会话使用的模型", symbol: "server.rack", action: { [weak self] in self?.configureModel() })
+        var commands: [NativeComposerMenu.Item] = [
+            .init(title: "权限", token: "permission", detail: "切换权限预设", symbol: "exclamationmark.shield", action: prepare { [weak self] in self?.configureAccess() }),
+            .init(title: "模型", token: "model", detail: "选择本会话使用的模型", symbol: "server.rack", action: prepare { [weak self] in self?.configureModel() })
         ]
+        if let query {
+            let needle = query.lowercased()
+            add = add.filter { !$0.token.isEmpty && (needle.isEmpty || $0.token.lowercased().contains(needle) || $0.title.lowercased().contains(needle)) }
+            commands = commands.filter { needle.isEmpty || $0.token.lowercased().contains(needle) || $0.title.lowercased().contains(needle) }
+            guard !add.isEmpty || !commands.isEmpty else { return }
+        }
         let controller = NativeComposerMenu(width: max(280, composerCard.bounds.width), groups: [("添加", add), ("指令", commands)], dismiss: { [weak self] in self?.composerMenuPanel?.dismiss() })
         let panel = NativeModelPanel(controller: controller, parent: parent, anchor: composerCard)
-        panel.onDismiss = { [weak self] in self?.composerMenuPanel = nil }
-        composerMenuPanel = panel; panel.present()
+        panel.onDismiss = { [weak self] in self?.composerMenuPanel = nil; self?.slashMenuOpen = false }
+        composerMenuPanel = panel; slashMenuOpen = fromSlash; panel.present(activate: !fromSlash)
     }
     @objc private func togglePDF() {
         guard includePDF || additionalPDFPaths.count < 4 else { showAttachmentError("最多可附加 4 个 PDF。"); return }
