@@ -1000,6 +1000,8 @@ class BrowserWorkflowMixin:
             if not isinstance(site_config, dict):
                 return []
 
+            if self._is_pdflight_verbatim(messages):
+                return []
             file_paste_config = site_config.get("file_paste", {}) or {}
             strategy = str(file_paste_config.get("temp_file_type") or "").strip().lower().lstrip(".")
             if not file_paste_config.get("enabled", False) or strategy != "chunk":
@@ -1763,7 +1765,12 @@ class BrowserWorkflowMixin:
                 "已自动忽略图片并继续执行纯文本对话。"
             )
         
-        if _prepared_prompt is None:
+        if self._is_pdflight_verbatim(messages):
+            # Preserve a single literal user turn: do not add padding, split
+            # it into prompted chunks, or replace it with a generated file.
+            prompt_text = self._build_prompt_from_messages(messages)
+            file_paste_config = {}
+        elif _prepared_prompt is None:
             prompt_text = self._build_prompt_from_messages(messages)
             prompt_text = self._apply_prompt_padding(prompt_text, prompt_padding_config)
         else:

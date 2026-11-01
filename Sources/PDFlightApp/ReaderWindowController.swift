@@ -1689,6 +1689,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let effort = activeAIConversationIndex.flatMap { aiHistory?.conversations[$0].reasoningEffort }
         let configuration = route.map { AIProviderConfiguration(baseURL: $0.baseURL, model: $0.model, api: $0.api, reasoningEffort: effort, forceAdaptiveThinking: $0.forceAdaptiveThinking, maxTokens: $0.maxTokens) }
             ?? aiConfigurationStore.configuration()
+        let usesWebGateway = AIConversationRouting.usesWebGateway(configuration)
         guard !configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             aiSidebar.prefill(
                 question,
@@ -1797,16 +1798,24 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 }.value
                 try Task.checkCancellation()
                 let referencedPDFs = resolved.pdfURLs
+                if usesWebGateway && !resolved.context.isEmpty {
+                    throw AIChatReferenceResolver.ReferenceError.unavailable("网页模型只发送输入框中的文字。请将引用内容粘贴到输入框，或直接附加 PDF。")
+                }
                 let allAdditionalPDFs = additionalPDFPaths.map { URL(fileURLWithPath: $0) } + referencedPDFs
                 let allPDFs = Set(allAdditionalPDFs.map(\.standardizedFileURL) + (includeCurrentPDF ? [documentURL.standardizedFileURL] : []))
                 guard allPDFs.count <= 4 else { throw AIChatReferenceResolver.ReferenceError.unavailable("最多可附加或引用 4 个 PDF。") }
-                var requestMessages = AIChatRequestBuilder.messages(
-                    instruction: "你是论文阅读助手。依据提供的论文与选文回答；默认使用中文，关键结论注明页码。区分原文与推断，缺少证据时直说，不编造。需要查阅论文时可使用 pdf_reading；需要查阅当前论文工作目录中的文本时可使用 read 或 grep。",
-                    paperContext: nil,
-                    conversation: recentAIConversation()
-                )
-                if !resolved.context.isEmpty, let last = requestMessages.lastIndex(where: { $0.role == .user }) {
-                    requestMessages[last].content += "\n\n以下是用户明确引用的资料内容：\n\(resolved.context)"
+                var requestMessages: [AIChatMessage]
+                if usesWebGateway {
+                    requestMessages = [AIChatMessage(id: userMessage.id, role: .user, content: question, imageAttachments: attachments)]
+                } else {
+                    requestMessages = AIChatRequestBuilder.messages(
+                        instruction: "你是论文阅读助手。依据提供的论文与选文回答；默认使用中文，关键结论注明页码。区分原文与推断，缺少证据时直说，不编造。需要查阅论文时可使用 pdf_reading；需要查阅当前论文工作目录中的文本时可使用 read 或 grep。",
+                        paperContext: nil,
+                        conversation: recentAIConversation()
+                    )
+                    if !resolved.context.isEmpty, let last = requestMessages.lastIndex(where: { $0.role == .user }) {
+                        requestMessages[last].content += "\n\n以下是用户明确引用的资料内容：\n\(resolved.context)"
+                    }
                 }
                 let conversationTitle = conversationKey == nil
                     ? nil
@@ -1865,12 +1874,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     listLibrary: listLibrary, listPrompts: listPrompts, runSubagent: runSubagent, runShell: runShell) { page in
                     try await documentEngine.text(on: page).plainText
                 }
-                let stream = AIChatAgentRunner.run(messages: requestMessages) { messages, round in
+                let stream = AIChatAgentRunner.run(messages: requestMessages, maximumRounds: usesWebGateway ? 1 : 12, allowToolCalls: !usesWebGateway) { messages, round in
                     let needsPDF = (hasPDF || !referencedPDFs.isEmpty) && (round == 0 || conversationKey == nil)
                     return client.streamChat(messages: messages, configuration: configuration, apiKey: apiKey,
                         conversationKey: conversationKey, conversationTitle: conversationTitle,
                         currentPDFURL: needsPDF && includeCurrentPDF ? document : nil,
-                        additionalPDFURLs: needsPDF ? allAdditionalPDFs : [], tools: AIPaperToolRuntime.definitions)
+                        additionalPDFURLs: needsPDF ? allAdditionalPDFs : [], tools: usesWebGateway ? [] : AIPaperToolRuntime.definitions)
                 } execute: { call in
                     await AIPaperToolRuntime.execute(call, context: context)
                 }

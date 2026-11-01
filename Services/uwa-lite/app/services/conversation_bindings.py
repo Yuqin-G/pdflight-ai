@@ -237,6 +237,10 @@ def plan_bound_request(
     normalized_domain = str(route_domain or "").strip().lower()
     source_messages = [dict(item) for item in messages if isinstance(item, dict)] \
         if isinstance(messages, list) else []
+    # A single user message in a bound web conversation is already complete.
+    # Mark it here as well because an OpenAI proxy may discard extra fields.
+    if len(source_messages) == 1 and source_messages[0].get("role") == "user":
+        source_messages[0]["pdflight_verbatim"] = True
     binding = store.get(normalized_key)
     if binding is None:
         return BoundConversationPlan(

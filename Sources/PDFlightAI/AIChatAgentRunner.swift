@@ -16,6 +16,7 @@ public enum AIChatAgentRunner {
     public static func run(
         messages: [AIChatMessage],
         maximumRounds: Int = 12,
+        allowToolCalls: Bool = true,
         model: @escaping Model,
         execute: @escaping Tool
     ) -> AsyncThrowingStream<AIChatAgentEvent, Error> {
@@ -32,6 +33,9 @@ public enum AIChatAgentRunner {
                             if event != .finished { continuation.yield(.modelDelta(event)) }
                         }
                         let calls = accumulator.toolCalls
+                        if !allowToolCalls && !calls.isEmpty {
+                            throw OpenAICompatibleError.service("网页聊天未启用工具调用，请直接回复文本。")
+                        }
                         if calls.isEmpty {
                             let answer = try accumulator.finalAnswer()
                             continuation.yield(.assistantCompleted(AIChatMessage(role: .assistant, content: answer, reasoning: accumulator.reasoning.isEmpty ? nil : accumulator.reasoning)))

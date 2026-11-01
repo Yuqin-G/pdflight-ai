@@ -136,8 +136,24 @@ class BrowserPromptMixin:
             return "-"
         return ",".join(f"{key}:{counts[key]}" for key in sorted(counts))
 
+    @staticmethod
+    def _is_pdflight_verbatim(messages: List[Dict]) -> bool:
+        return (len(messages) == 1 and isinstance(messages[0], dict)
+                and messages[0].get("role") == "user"
+                and messages[0].get("pdflight_verbatim") is True)
+
     def _build_prompt_from_messages(self, messages: List[Dict]) -> str:
         """从消息列表构建发送给网页的文本"""
+        if self._is_pdflight_verbatim(messages):
+            content = messages[0].get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                # Images and files are uploaded separately; never append
+                # synthetic labels or local paths to the user's text.
+                return "".join(str(item.get("text", "")) for item in content
+                               if isinstance(item, dict) and item.get("type") == "text")
+            return ""
         prompt_parts = []
         role_counts: Dict[str, int] = {}
         type_counts: Dict[str, int] = {}

@@ -110,7 +110,7 @@ public struct OpenAICompatibleClient: Sendable {
         }
         request.httpBody = try JSONEncoder().encode(RequestBody(
             model: model,
-            messages: messages.map(RequestMessage.init),
+            messages: messages.map { RequestMessage($0, verbatim: AIConversationRouting.usesWebGateway(configuration) && messages.count == 1 && $0.role == .user) },
             stream: true,
             reasoningEffort: configuration.reasoningEffort,
             maxTokens: configuration.maxTokens.flatMap { $0 > 0 ? $0 : nil },
@@ -326,21 +326,25 @@ private struct RequestPDFAttachment: Encodable {
 private struct RequestMessage: Encodable {
     let role: String
     let message: AIChatMessage
+    let verbatim: Bool
 
-    init(_ message: AIChatMessage) {
+    init(_ message: AIChatMessage, verbatim: Bool = false) {
         role = message.role.rawValue
         self.message = message
+        self.verbatim = verbatim
     }
 
     enum CodingKeys: String, CodingKey {
         case role, content
         case toolCalls = "tool_calls"
         case toolCallID = "tool_call_id"
+        case verbatim = "pdflight_verbatim"
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(role, forKey: .role)
+        if verbatim { try container.encode(true, forKey: .verbatim) }
         if let calls = message.toolCalls, !calls.isEmpty { try container.encode(calls.map(RequestToolCall.init), forKey: .toolCalls) }
         if message.role == .tool {
             guard let id = message.toolEvent?.callID, !id.isEmpty else {

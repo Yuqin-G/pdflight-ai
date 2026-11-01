@@ -1040,8 +1040,15 @@ enum PDFlightAIChecks {
         )
         let gatewayQwen = AIProviderConfiguration(baseURL: "http://127.0.0.1:3425/v1", model: "uwa-lite-local/qwen")
         try check(AIConversationRouting.conversationKey(for: "local-a", configuration: gatewayQwen) == "pdflight:conversation:local-a", "the migrated Magpie Qwen route must retain a per-conversation web binding")
+        try check(AIConversationRouting.usesWebGateway(gatewayQwen), "Magpie web models must use literal browser chat")
+        let exactText = "  保留空格\n\n第二行  "
+        let exactRequest = try OpenAICompatibleClient().makeRequest(messages: [.init(role: .user, content: exactText)], configuration: gatewayQwen, apiKey: "", conversationKey: "pdflight:conversation:local-a")
+        let exactBody = try JSONSerialization.jsonObject(with: exactRequest.httpBody!) as! [String: Any]
+        let exactMessages = exactBody["messages"] as! [[String: Any]]
+        try check(exactMessages.count == 1 && exactMessages[0]["content"] as? String == exactText && exactMessages[0]["pdflight_verbatim"] as? Bool == true && exactBody["tools"] == nil, "browser request must preserve the user's text and omit tools")
         let unrelated = AIProviderConfiguration(baseURL: "http://127.0.0.1:3425/v1", model: "other/qwen")
         try check(AIConversationRouting.conversationKey(for: "local-a", configuration: unrelated) == nil, "unrelated gateway models must not receive the Qwen-only binding")
+        try check(!AIConversationRouting.usesWebGateway(unrelated), "unrelated Magpie models must keep their existing API behavior")
     }
 
     private static func openAIStreamDecoderSeparatesReasoningFromFinalContent() throws {

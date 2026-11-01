@@ -115,12 +115,21 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             if let savedZoom { UserDefaults.standard.set(savedZoom, forKey: "reader.nativePaperChatZoom") }
             else { UserDefaults.standard.removeObject(forKey: "reader.nativePaperChatZoom") }
         }
+        let layoutWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        layoutWindow.contentView = sidebar
+        defer { layoutWindow.contentView = nil }
         sidebar.setChatZoom(1)
         sidebar.layoutSubtreeIfNeeded()
         sidebar.previewChatZoomChange(40, phase: .changed)
         guard sidebar.chatZoom == 1, let preview = sidebar.previewChatZoom, preview > 1,
               abs(sidebar.messagesScroll.magnification - preview) < 0.01 else {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 23, userInfo: [NSLocalizedDescriptionKey: "捏合时必须先预览，不逐次重建消息"])
+        }
+        sidebar.messagesScroll.layoutSubtreeIfNeeded()
+        sidebar.messagesStack.layoutSubtreeIfNeeded()
+        let visibleWidth = sidebar.messagesScroll.documentVisibleRect.width
+        if visibleWidth <= 0 || sidebar.messagesStack.frame.width > visibleWidth + 1 {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 27, userInfo: [NSLocalizedDescriptionKey: "捏合时消息内容不能超出可见宽度"])
         }
         sidebar.previewChatZoomChange(0, phase: .ended)
         guard sidebar.previewChatZoom == nil, abs(sidebar.chatZoom - preview) < 0.001,
@@ -168,12 +177,13 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private let addButton = NSButton(title: "+ 新建对话", target: nil, action: nil)
     private let zoomButton = NSButton(title: "100%", target: nil, action: nil)
     private var zoomWidth: NSLayoutConstraint?
-    private let presetPopup = NSPopUpButton()
-    private let applyButton = NSButton(title: "填入输入框", target: nil, action: nil)
-    private let recordButton = NSButton(title: "▤", target: nil, action: nil)
-    private let webButton = NSButton(title: "↗", target: nil, action: nil)
+    private let presetPopup = NativePaperPresetPopup()
+    private let applyButton = NativePaperToolbarButton(title: "填入输入框", target: nil, action: nil)
+    private let recordButton = NativePaperToolbarButton(title: "▤", target: nil, action: nil)
+    private let webButton = NativePaperToolbarButton(title: "↗", target: nil, action: nil)
     private let messagesScroll = NativePaperChatScrollView()
     private let messagesStack = NativePaperMessageStack()
+    private var messagesWidthConstraint: NSLayoutConstraint?
     private let composerCard = NSView()
     private let attachmentScroll = NSScrollView()
     private let attachmentStack = NSStackView()
@@ -294,7 +304,13 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         recordButton.isBordered = false; recordButton.setAccessibilityLabel("打开会话记录目录")
         recordButton.target = self; recordButton.action = #selector(revealHistory)
         webButton.isBordered = false; webButton.setAccessibilityLabel("在网页继续对话")
-        webButton.target = self; webButton.action = #selector(openWebConversation); webButton.isHidden = true
+        webButton.target = self; webButton.action = #selector(openWebConversation); webButton.isEnabled = false
+        for button in [recordButton, webButton] {
+            button.drawsOutline = true
+            button.widthAnchor.constraint(equalToConstant: 26).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 25).isActive = true
+            button.font = .systemFont(ofSize: 16)
+        }
         let prompts = NSStackView(views: [promptLabel, presetPopup, applyButton, recordButton, webButton])
         prompts.orientation = .horizontal; prompts.alignment = .centerY; prompts.distribution = .fill; prompts.spacing = 7
         prompts.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
@@ -311,7 +327,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         messagesScroll.maxMagnification = 3.0
         messagesScroll.onZoom = { [weak self] delta, phase in self?.previewChatZoomChange(delta, phase: phase) }
         messagesStack.translatesAutoresizingMaskIntoConstraints = false
-        messagesStack.widthAnchor.constraint(equalTo: messagesScroll.contentView.widthAnchor, constant: -16).isActive = true
+        let messageWidth = messagesStack.widthAnchor.constraint(equalTo: messagesScroll.contentView.widthAnchor, constant: -16)
+        messageWidth.isActive = true; messagesWidthConstraint = messageWidth
         composerCard.wantsLayer = true; composerCard.layer?.cornerRadius = 14
         composerCard.layer?.borderWidth = 0.5; composerCard.layer?.borderColor = NSColor.separatorColor.cgColor
         effectiveAppearance.performAsCurrentDrawingAppearance { composerCard.layer?.backgroundColor = NativeHarnessStyle.input.cgColor }
@@ -405,6 +422,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             let clip = messagesScroll.contentView
             let center = messagesStack.convert(NSPoint(x: clip.bounds.midX, y: clip.bounds.midY), from: clip)
             messagesScroll.setMagnification(next / chatZoom, centeredAt: center)
+            // Reflow to the visible width while zooming and keep the left edge
+            // pinned, so a magnified message cannot slide behind the gutter.
+            messagesWidthConstraint?.constant = clip.bounds.width - clip.frame.width - 16
+            clip.scroll(to: NSPoint(x: 0, y: clip.bounds.minY))
+            messagesScroll.reflectScrolledClipView(clip)
             zoomButton.title = "\(Int((next * 100).rounded()))%"
             zoomButton.isHidden = abs(next - 1) < 0.005
             zoomWidth?.constant = zoomButton.isHidden ? 0 : 40
@@ -430,6 +452,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         let centerFraction = min(1, max(0, messagesScroll.documentVisibleRect.midY / oldHeight))
         let wasAtBottom = messagesScroll.documentVisibleRect.maxY >= oldHeight - 2
         messagesScroll.setMagnification(1, centeredAt: .zero)
+        messagesWidthConstraint?.constant = -16
         setChatZoom(value)
         messagesStack.layoutSubtreeIfNeeded()
         messagesScroll.layoutSubtreeIfNeeded()
@@ -466,7 +489,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     func setWebConversationURL(_ value: String?) {
         let url = value.flatMap(URL.init(string:))
         webConversationURL = url.flatMap { ["http", "https"].contains($0.scheme?.lowercased() ?? "") ? $0 : nil }
-        webButton.isHidden = webConversationURL == nil
+        webButton.isEnabled = webConversationURL != nil
     }
     func setModelRoutes(_ routes: [HarnessModelImport.Route], selectedID: String?, reasoningEffort: String? = nil, customModel: String = "") {
         modelRoutes = routes; currentModelRouteID = selectedID; currentReasoningEffort = reasoningEffort
@@ -1055,6 +1078,44 @@ private final class NativePaperComposer: NSTextView {
 
 private final class NativePaperMessageStack: NSStackView {
     override var isFlipped: Bool { true }
+}
+
+/// Matches the reading-mode controls without adding hover tooltips.
+private final class NativePaperToolbarButton: NSButton {
+    var drawsOutline = false { didSet { needsDisplay = true } }
+    private var hovered = false
+    override func updateTrackingAreas() {
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect], owner: self, userInfo: nil))
+        super.updateTrackingAreas()
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        if hovered { NSColor.labelColor.withAlphaComponent(isEnabled ? 0.07 : 0.035).setFill(); path.fill() }
+        if drawsOutline { NSColor.separatorColor.withAlphaComponent(0.65).setStroke(); path.lineWidth = 0.5; path.stroke() }
+        super.draw(dirtyRect)
+    }
+}
+
+private final class NativePaperPresetPopup: NSPopUpButton {
+    override func draw(_ dirtyRect: NSRect) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let font = self.font ?? .systemFont(ofSize: 11)
+        let text = selectedItem?.title ?? ""
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: isEnabled ? NSColor.labelColor : NSColor.disabledControlTextColor,
+            .paragraphStyle: paragraph
+        ]
+        let textHeight = ceil(font.ascender - font.descender + font.leading)
+        (text as NSString).draw(in: NSRect(x: 8, y: (bounds.height - textHeight) / 2, width: max(0, bounds.width - 30), height: textHeight), withAttributes: attributes)
+        if let image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil) {
+            let symbol = image.withSymbolConfiguration(.init(pointSize: 10, weight: .regular)) ?? image
+            symbol.draw(in: NSRect(x: bounds.width - 18, y: (bounds.height - 11) / 2, width: 10, height: 11))
+        }
+    }
 }
 
 private final class NativePaperChatScrollView: NSScrollView {
