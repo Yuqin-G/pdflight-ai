@@ -1969,6 +1969,16 @@ final class AIChatRenderedContentView: NSStackView {
     private var harnessSerifHeading = false
     private var harnessHeadingLineHeight: CGFloat?
 
+    static func harnessLinkHitTestForLayoutCheck() -> Bool {
+        let field = AIChatSelectableTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        let expected = URL(string: "https://example.com")!
+        field.attributedStringValue = NSAttributedString(string: "test link", attributes: [
+            .font: NSFont.systemFont(ofSize: 14), AIChatSelectableTextField.harnessLink: expected
+        ])
+        guard let drawing = field.cell?.drawingRect(forBounds: field.bounds) else { return false }
+        return field.harnessLink(at: NSPoint(x: drawing.minX + 3, y: drawing.midY)) == expected
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         orientation = .vertical
@@ -2417,7 +2427,19 @@ final class AIChatRenderedContentView: NSStackView {
     private func addAttributedText(_ attributed: NSAttributedString) {
         guard attributed.length > 0 else { return }
         let label = AIChatSelectableTextField(labelWithString: "")
-        label.attributedStringValue = attributed
+        if harnessTypography {
+            let styled = NSMutableAttributedString(attributedString: attributed)
+            let range = NSRange(location: 0, length: styled.length)
+            styled.enumerateAttribute(.link, in: range) { link, linkRange, _ in
+                guard let link else { return }
+                styled.addAttribute(AIChatSelectableTextField.harnessLink, value: link, range: linkRange)
+                styled.removeAttribute(.link, range: linkRange)
+                styled.addAttribute(.foregroundColor, value: NativeHarnessStyle.link, range: linkRange)
+            }
+            label.attributedStringValue = styled
+        } else {
+            label.attributedStringValue = attributed
+        }
         label.maximumNumberOfLines = 0
         label.lineBreakMode = .byWordWrapping
         label.isSelectable = true
@@ -2482,7 +2504,7 @@ final class AIChatRenderedContentView: NSStackView {
             let isCode = rawValue & 4 != 0
             var font: NSFont
             if isCode {
-                font = NSFont.monospacedSystemFont(ofSize: baseSize * 0.90, weight: .regular)
+                font = NSFont.monospacedSystemFont(ofSize: harnessTypography ? 12 * bodyFontSize / 14 : baseSize * 0.90, weight: .regular)
             } else if harnessSerifHeading {
                 let descriptor = NSFontDescriptor(fontAttributes: [
                     .name: "IowanOldStyle-Bold",
@@ -2504,14 +2526,14 @@ final class AIChatRenderedContentView: NSStackView {
             if isCode {
                 value.addAttribute(
                     .backgroundColor,
-                    value: NSColor.quaternaryLabelColor.withAlphaComponent(0.12),
+                    value: harnessTypography ? NativeHarnessStyle.code : NSColor.quaternaryLabelColor.withAlphaComponent(0.12),
                     range: range
                 )
             }
         }
         value.enumerateAttribute(.link, in: fullRange) { link, range, _ in
             guard link != nil else { return }
-            value.addAttribute(.foregroundColor, value: NSColor.linkColor, range: range)
+            value.addAttribute(.foregroundColor, value: harnessTypography ? NativeHarnessStyle.link : NSColor.linkColor, range: range)
         }
     }
 
@@ -2520,11 +2542,13 @@ final class AIChatRenderedContentView: NSStackView {
         container.wantsLayer = true
         container.layer?.cornerRadius = 8
         container.layer?.cornerCurve = .continuous
-        container.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.82).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            container.layer?.backgroundColor = (harnessTypography ? NativeHarnessStyle.codeBlock : NSColor.controlBackgroundColor.withAlphaComponent(0.82)).cgColor
+        }
         container.translatesAutoresizingMaskIntoConstraints = false
         let label = AIChatSelectableTextField(wrappingLabelWithString: content)
-        label.font = .monospacedSystemFont(ofSize: bodyFontSize * 0.90, weight: .regular)
-        label.textColor = .labelColor
+        label.font = .monospacedSystemFont(ofSize: harnessTypography ? 12 * bodyFontSize / 14 : bodyFontSize * 0.90, weight: .regular)
+        label.textColor = harnessTypography ? NativeHarnessStyle.primary : .labelColor
         label.maximumNumberOfLines = 0
         label.lineBreakMode = .byCharWrapping
         label.isSelectable = true
@@ -2706,8 +2730,38 @@ private final class AIChatDisplayMathScrollView: NSScrollView {
 
 @MainActor
 private final class AIChatSelectableTextField: NSTextField {
+    static let harnessLink = NSAttributedString.Key("PDFlightHarnessLink")
     override var acceptsFirstResponder: Bool {
         isSelectable || isEditable
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let start = NSEvent.mouseLocation
+        let link = harnessLink(at: convert(event.locationInWindow, from: nil))
+        super.mouseDown(with: event)
+        let end = NSEvent.mouseLocation
+        guard event.clickCount == 1, hypot(end.x - start.x, end.y - start.y) < 3, let link else { return }
+        NSWorkspace.shared.open(link)
+    }
+
+    fileprivate func harnessLink(at point: NSPoint) -> URL? {
+        let value = attributedStringValue
+        guard value.length > 0, let cell else { return nil }
+        let drawing = cell.drawingRect(forBounds: bounds)
+        let text = NSTextStorage(attributedString: value)
+        let layout = NSLayoutManager(); let container = NSTextContainer(size: drawing.size)
+        container.lineFragmentPadding = 0; container.maximumNumberOfLines = 0
+        layout.addTextContainer(container); text.addLayoutManager(layout)
+        layout.ensureLayout(for: container)
+        let position = NSPoint(x: point.x - drawing.minX, y: point.y - drawing.minY)
+        guard layout.usedRect(for: container).contains(position), layout.numberOfGlyphs > 0 else { return nil }
+        let glyph = layout.glyphIndex(for: position, in: container)
+        guard layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container).contains(position) else { return nil }
+        let index = layout.characterIndexForGlyph(at: glyph)
+        let raw = value.attribute(Self.harnessLink, at: index, effectiveRange: nil)
+        if let url = raw as? URL { return url }
+        if let string = raw as? String { return URL(string: string) }
+        return nil
     }
 }
 

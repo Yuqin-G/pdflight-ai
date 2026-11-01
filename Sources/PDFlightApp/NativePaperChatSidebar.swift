@@ -8,6 +8,9 @@ import UniformTypeIdentifiers
 final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     static let customRouteID = "__pdflight_custom_model__"
     static func selfCheck() throws {
+        guard AIChatRenderedContentView.harnessLinkHitTestForLayoutCheck() else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "主题链接必须保持可点击"])
+        }
         let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 440, height: 700))
         var savedText = ""; var savedImages: [AIChatImageAttachment] = []; var savedPDF = false
         sidebar.onDraftChange = { text, images, pdf in savedText = text; savedImages = images; savedPDF = pdf }

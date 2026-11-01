@@ -11,6 +11,21 @@ enum NativeHarnessStyle {
             ? NSColor(srgbRed: 31/255, green: 30/255, blue: 27/255, alpha: 1)
             : .white
     }
+    static let link = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 226/255, green: 144/255, blue: 111/255, alpha: 1)
+            : NSColor(srgbRed: 163/255, green: 78/255, blue: 51/255, alpha: 1)
+    }
+    static let code = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 42/255, green: 39/255, blue: 34/255, alpha: 1)
+            : NSColor(srgbRed: 241/255, green: 237/255, blue: 228/255, alpha: 1)
+    }
+    static let codeBlock = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 29/255, green: 28/255, blue: 25/255, alpha: 1)
+            : NSColor(srgbRed: 243/255, green: 240/255, blue: 232/255, alpha: 1)
+    }
     static let userBubble = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor.white.withAlphaComponent(0.10)
