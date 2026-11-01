@@ -40,7 +40,16 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard savedImages.count == 1, savedImages[0].data == png, savedText.hasSuffix("existing draft") else {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "粘贴图片必须进入草稿且保留文字"])
         }
+        sidebar.setPaperTitle("缩放测试论文")
+        guard sidebar.toolTip == nil else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 25, userInfo: [NSLocalizedDescriptionKey: "聊天正文悬停时不能显示论文标题提示"])
+        }
         sidebar.togglePDF()
+        guard sidebar.attachmentStack.arrangedSubviews.compactMap({ $0 as? NSStackView })
+            .flatMap({ $0.arrangedSubviews.compactMap { $0 as? NSTextField } })
+            .contains(where: { $0.stringValue.contains("缩放测试论文") }) else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 26, userInfo: [NSLocalizedDescriptionKey: "移除悬停提示后 PDF 附件仍须显示论文名称"])
+        }
         guard savedPDF else { throw NSError(domain: "NativePaperChatSelfCheck", code: 4, userInfo: [NSLocalizedDescriptionKey: "附加 PDF 的选择必须进入草稿"]) }
         guard sidebar.attachmentStack.arrangedSubviews.count == 2, !sidebar.attachmentScroll.isHidden,
               sidebar.attachmentStack.frame.width > 0 else {
@@ -204,6 +213,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var currentReasoningEffort: String?
     private var accessMode: AIChatAccessMode = .readOnly
     private var customModelTitle = "自定义模型"
+    private var paperTitle = "当前 PDF"
     private var webConversationURL: URL?
     private var modelPanel: NativeModelPanel?
     private var composerMenuPanel: NativeModelPanel?
@@ -281,9 +291,9 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         presetPopup.heightAnchor.constraint(equalToConstant: 26).isActive = true
         applyButton.isBordered = false; applyButton.font = .systemFont(ofSize: 11)
         applyButton.target = self; applyButton.action = #selector(applyPreset)
-        recordButton.isBordered = false; recordButton.toolTip = "打开会话记录目录"
+        recordButton.isBordered = false; recordButton.setAccessibilityLabel("打开会话记录目录")
         recordButton.target = self; recordButton.action = #selector(revealHistory)
-        webButton.isBordered = false; webButton.toolTip = "在网页继续对话"
+        webButton.isBordered = false; webButton.setAccessibilityLabel("在网页继续对话")
         webButton.target = self; webButton.action = #selector(openWebConversation); webButton.isHidden = true
         let prompts = NSStackView(views: [promptLabel, presetPopup, applyButton, recordButton, webButton])
         prompts.orientation = .horizontal; prompts.alignment = .centerY; prompts.distribution = .fill; prompts.spacing = 7
@@ -320,7 +330,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         composerScroll.documentView = composer
         attachButton.isBordered = false; attachButton.target = self; attachButton.action = #selector(attach)
-        attachButton.toolTip = "添加图片或当前 PDF"
+        attachButton.setAccessibilityLabel("添加图片或当前 PDF")
         attachButton.attributedTitle = NSAttributedString(string: "+", attributes: [.font: NSFont.systemFont(ofSize: 18), .foregroundColor: NativeHarnessStyle.primary])
         modelButton.isBordered = false; modelButton.font = .systemFont(ofSize: 13); modelButton.lineBreakMode = .byTruncatingTail
         modelButton.target = self; modelButton.action = #selector(configureModel)
@@ -375,7 +385,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
 
     private func divider() -> NSView { let view = NSBox(); view.boxType = .separator; return view }
-    func setPaperTitle(_ title: String) { toolTip = title; if includePDF { updateAttachments() } }
+    func setPaperTitle(_ title: String) { paperTitle = title; if includePDF { updateAttachments() } }
     func setReferenceDirectory(_ directory: URL) { referenceDirectory = directory }
     func activate() { }
     func close() { modelPanel?.dismiss(); modelPanel = nil }
@@ -474,7 +484,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             button.identifier = NSUserInterfaceItemIdentifier(conversation.id); button.isBordered = false
             button.lineBreakMode = .byTruncatingTail
             button.font = .systemFont(ofSize: 12, weight: conversation.id == selectedID ? .semibold : .regular)
-            button.isEnabled = !busy; button.toolTip = conversation.title
+            button.isEnabled = !busy
             let close = NSButton(title: "×", target: self, action: #selector(deleteConversation(_:)))
             close.identifier = button.identifier; close.isBordered = false; close.isEnabled = !busy
             let row = NativePaperTab(views: [button, close]); row.orientation = .horizontal; row.spacing = 2
@@ -537,11 +547,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         row.addArrangedSubview(rendered)
         if message.role == .assistant {
             let copy = NSButton(image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "复制回复") ?? NSImage(), target: self, action: #selector(copyMessage(_:)))
-            copy.identifier = NSUserInterfaceItemIdentifier(message.id); copy.isBordered = false; copy.contentTintColor = .secondaryLabelColor; copy.toolTip = "复制回复"
+            copy.identifier = NSUserInterfaceItemIdentifier(message.id); copy.isBordered = false; copy.contentTintColor = .secondaryLabelColor
             func feedbackButton(_ symbol: String, label: String, value: Int) -> NSButton {
                 let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage(), target: self, action: #selector(selectFeedback(_:)))
                 button.identifier = NSUserInterfaceItemIdentifier(message.id); button.tag = value; button.isBordered = false; button.setButtonType(.toggle)
-                button.contentTintColor = .secondaryLabelColor; button.toolTip = label
+                button.contentTintColor = .secondaryLabelColor
                 button.state = (message.feedback == (value == 1 ? "positive" : "negative")) ? .on : .off
                 return button
             }
@@ -549,7 +559,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             let bad = feedbackButton("hand.thumbsdown", label: "有问题的回答", value: -1)
             feedbackButtons[message.id] = (good, bad)
             let branch = NSButton(image: NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "在新对话中分支") ?? NSImage(), target: self, action: #selector(branchMessage(_:)))
-            branch.identifier = copy.identifier; branch.isBordered = false; branch.contentTintColor = .secondaryLabelColor; branch.toolTip = "在新对话中分支"
+            branch.identifier = copy.identifier; branch.isBordered = false; branch.contentTintColor = .secondaryLabelColor
             let menu = NSMenu(); let delete = NSMenuItem(title: "删除消息", action: #selector(deleteMessageFromMenu(_:)), keyEquivalent: "")
             delete.target = self; delete.representedObject = message.id; menu.addItem(delete); row.menu = menu
             let formatter = DateFormatter(); formatter.dateFormat = "M月d日 HH:mm"
@@ -739,9 +749,9 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private func updateAttachments() {
         attachmentStack.arrangedSubviews.forEach { attachmentStack.removeArrangedSubview($0); $0.removeFromSuperview() }
         if includePDF {
-            let name = NSTextField(labelWithString: "▤  " + (toolTip ?? "当前 PDF")); name.font = .systemFont(ofSize: 12)
+            let name = NSTextField(labelWithString: "▤  " + paperTitle); name.font = .systemFont(ofSize: 12)
             name.lineBreakMode = .byTruncatingMiddle; name.widthAnchor.constraint(lessThanOrEqualToConstant: 180).isActive = true
-            let remove = NSButton(title: "×", target: self, action: #selector(togglePDF)); remove.isBordered = false; remove.toolTip = "移除当前 PDF"
+            let remove = NSButton(title: "×", target: self, action: #selector(togglePDF)); remove.isBordered = false; remove.setAccessibilityLabel("移除当前 PDF")
             let chip = NSStackView(views: [name, remove]); chip.orientation = .horizontal; chip.spacing = 5
             chip.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 5)
             chip.wantsLayer = true; chip.layer?.cornerRadius = 6; chip.layer?.borderWidth = 0.5; chip.layer?.borderColor = NSColor.separatorColor.cgColor
@@ -750,7 +760,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         for path in additionalPDFPaths {
             let name = NSTextField(labelWithString: "▤  " + URL(fileURLWithPath: path).lastPathComponent); name.font = .systemFont(ofSize: 12)
             name.lineBreakMode = .byTruncatingMiddle; name.widthAnchor.constraint(lessThanOrEqualToConstant: 180).isActive = true
-            let remove = NSButton(title: "×", target: self, action: #selector(removeAdditionalPDF(_:))); remove.isBordered = false; remove.toolTip = "移除 PDF"
+            let remove = NSButton(title: "×", target: self, action: #selector(removeAdditionalPDF(_:))); remove.isBordered = false; remove.setAccessibilityLabel("移除 PDF")
             remove.identifier = NSUserInterfaceItemIdentifier(path)
             let chip = NSStackView(views: [name, remove]); chip.orientation = .horizontal; chip.spacing = 5
             chip.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 5)
@@ -758,7 +768,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             attachmentStack.addArrangedSubview(chip)
         }
         for image in attachments {
-            let chip = AIChatImageChip(attachment: image, removable: true, removeTitle: "移除图片")
+            let chip = AIChatImageChip(attachment: image, removable: true, removeTitle: "移除图片", showsToolTips: false)
             chip.onRemove = { [weak self] in
                 self?.attachments.removeAll { $0.id == image.id }; self?.updateAttachments(); self?.draftChanged()
             }

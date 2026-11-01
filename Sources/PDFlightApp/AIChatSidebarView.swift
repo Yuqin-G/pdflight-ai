@@ -2145,7 +2145,7 @@ final class AIChatRenderedContentView: NSStackView {
             row.alignment = .centerY
             row.spacing = 7
             for attachment in imageAttachments {
-                row.addArrangedSubview(AIChatImageChip(attachment: attachment, removable: false))
+                row.addArrangedSubview(AIChatImageChip(attachment: attachment, removable: false, showsToolTips: !harnessTypography))
             }
             addArrangedSubview(row)
         }
@@ -3012,7 +3012,7 @@ final class AIChatImageChip: NSView {
     var onRemove: (() -> Void)?
     private let removeButton = NSButton()
 
-    init(attachment: AIChatImageAttachment, removable: Bool, removeTitle: String = "Remove image") {
+    init(attachment: AIChatImageAttachment, removable: Bool, removeTitle: String = "Remove image", showsToolTips: Bool = true) {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 7
@@ -3027,7 +3027,7 @@ final class AIChatImageChip: NSView {
         imageView.wantsLayer = true
         imageView.layer?.cornerRadius = 6
         imageView.layer?.masksToBounds = true
-        imageView.toolTip = attachment.fileName
+        imageView.toolTip = showsToolTips ? attachment.fileName : nil
         imageView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(imageView)
 
@@ -3037,7 +3037,7 @@ final class AIChatImageChip: NSView {
         removeButton.target = self
         removeButton.action = #selector(removePressed(_:))
         removeButton.isHidden = !removable
-        removeButton.toolTip = removeTitle
+        removeButton.toolTip = showsToolTips ? removeTitle : nil
         removeButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(removeButton)
 
