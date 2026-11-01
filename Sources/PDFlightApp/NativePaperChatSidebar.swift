@@ -29,6 +29,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         sidebar.togglePDF()
         guard savedPDF else { throw NSError(domain: "NativePaperChatSelfCheck", code: 4, userInfo: [NSLocalizedDescriptionKey: "附加 PDF 的选择必须进入草稿"]) }
+        guard sidebar.attachmentStack.arrangedSubviews.count == 2, !sidebar.attachmentScroll.isHidden,
+              sidebar.attachmentStack.frame.width > 0 else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 11, userInfo: [NSLocalizedDescriptionKey: "图片和 PDF 附件卡片必须可见"])
+        }
         var submitted = false
         sidebar.onSend = { text, images, _, pdf in submitted = text == savedText && images == savedImages && pdf }
         sidebar.sendOrStop()
@@ -43,6 +47,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         var stopped = false; sidebar.onCancel = { stopped = true }; sidebar.sendOrStop()
         guard stopped else { throw NSError(domain: "NativePaperChatSelfCheck", code: 9, userInfo: [NSLocalizedDescriptionKey: "回复期间没有草稿时按钮必须停止回复"]) }
         sidebar.setStreaming(false)
+        sidebar.restoreDraft("保留文字", attachments: [AIChatImageAttachment(fileName: "fixture.png", mimeType: "image/png", data: png)], includePDF: true)
+        (sidebar.attachmentStack.arrangedSubviews.last as? AIChatImageChip)?.onRemove?()
+        guard sidebar.attachments.isEmpty, sidebar.includePDF, sidebar.composer.string == "保留文字" else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 12, userInfo: [NSLocalizedDescriptionKey: "移除单张图片不能清除 PDF 或文字"])
+        }
         let pdfMessage = AIChatMessage(role: .user, content: "阅读附件", pdfAttachmentName: "paper.pdf")
         sidebar.append(pdfMessage)
         let row = sidebar.messageRows[pdfMessage.id] as? NSStackView
@@ -86,11 +95,13 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private let messagesScroll = NativePaperChatScrollView()
     private let messagesStack = NativePaperMessageStack()
     private let composerCard = NSView()
+    private let attachmentScroll = NSScrollView()
+    private let attachmentStack = NSStackView()
+    private var attachmentHeight: NSLayoutConstraint?
     private let composerScroll = NSScrollView()
     private let composer = NativePaperComposer()
     private var composerHeight: NSLayoutConstraint?
     private let attachButton = NSButton(title: "+", target: nil, action: nil)
-    private let attachmentLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton(title: "选择模型 ▾", target: nil, action: nil)
     private let accessButton = NSButton(title: "仅可查看 ▾", target: nil, action: nil)
     private let sendButton = NSButton(title: "↑", target: nil, action: nil)
@@ -219,7 +230,6 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         attachButton.isBordered = false; attachButton.target = self; attachButton.action = #selector(attach)
         attachButton.toolTip = "添加图片或当前 PDF"
         attachButton.attributedTitle = NSAttributedString(string: "+", attributes: [.font: NSFont.systemFont(ofSize: 18), .foregroundColor: NativeHarnessStyle.primary])
-        attachmentLabel.font = .systemFont(ofSize: 10); attachmentLabel.textColor = .secondaryLabelColor
         modelButton.isBordered = false; modelButton.font = .systemFont(ofSize: 13); modelButton.lineBreakMode = .byTruncatingTail
         modelButton.target = self; modelButton.action = #selector(configureModel)
         accessButton.isBordered = false; accessButton.font = .systemFont(ofSize: 13)
@@ -228,17 +238,25 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         sendButton.isBordered = false; sendButton.target = self; sendButton.action = #selector(sendOrStop)
         updateSendButton()
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let footer = NSStackView(views: [attachButton, accessButton, attachmentLabel, spacer, modelButton, sendButton])
+        let footer = NSStackView(views: [attachButton, accessButton, spacer, modelButton, sendButton])
         footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 6
         attachButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
         sendButton.widthAnchor.constraint(equalToConstant: 34).isActive = true
         for button in [attachButton, accessButton, sendButton] { button.setContentCompressionResistancePriority(.required, for: .horizontal) }
         modelButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        attachmentStack.orientation = .horizontal; attachmentStack.alignment = .centerY; attachmentStack.spacing = 8
+        attachmentScroll.drawsBackground = false; attachmentScroll.hasHorizontalScroller = true; attachmentScroll.autohidesScrollers = true
+        attachmentScroll.documentView = attachmentStack; attachmentScroll.isHidden = true
+        attachmentScroll.translatesAutoresizingMaskIntoConstraints = false
         composerScroll.translatesAutoresizingMaskIntoConstraints = false; footer.translatesAutoresizingMaskIntoConstraints = false
-        composerCard.addSubview(composerScroll); composerCard.addSubview(footer)
+        composerCard.addSubview(attachmentScroll); composerCard.addSubview(composerScroll); composerCard.addSubview(footer)
+        let attachmentHeight = attachmentScroll.heightAnchor.constraint(equalToConstant: 0); attachmentHeight.isActive = true; self.attachmentHeight = attachmentHeight
         let height = composerScroll.heightAnchor.constraint(equalToConstant: 36); height.isActive = true; composerHeight = height
         NSLayoutConstraint.activate([
-            composerScroll.topAnchor.constraint(equalTo: composerCard.topAnchor, constant: 6),
+            attachmentScroll.topAnchor.constraint(equalTo: composerCard.topAnchor, constant: 6),
+            attachmentScroll.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 12),
+            attachmentScroll.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -12),
+            composerScroll.topAnchor.constraint(equalTo: attachmentScroll.bottomAnchor),
             composerScroll.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 5),
             composerScroll.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -5),
             footer.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 8),
@@ -265,7 +283,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
 
     private func divider() -> NSView { let view = NSBox(); view.boxType = .separator; return view }
-    func setPaperTitle(_ title: String) { toolTip = title }
+    func setPaperTitle(_ title: String) { toolTip = title; if includePDF { updateAttachments() } }
     func activate() { }
     func close() { modelPanel?.dismiss(); modelPanel = nil }
     func setModelTitle(_ title: String) {
@@ -503,7 +521,30 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         sendButton.isEnabled = busy || hasContent
         sendButton.attributedTitle = NSAttributedString(string: showsStop ? "■" : "↑", attributes: [.font: NSFont.systemFont(ofSize: showsStop ? 13 : 19, weight: .medium), .foregroundColor: hasContent || busy ? NativeHarnessStyle.primary : NativeHarnessStyle.caption])
     }
-    private func updateAttachments() { attachmentLabel.stringValue = ([includePDF ? "PDF" : nil, attachments.isEmpty ? nil : "\(attachments.count) 张图片"].compactMap { $0 }).joined(separator: " · ") }
+    private func updateAttachments() {
+        attachmentStack.arrangedSubviews.forEach { attachmentStack.removeArrangedSubview($0); $0.removeFromSuperview() }
+        if includePDF {
+            let name = NSTextField(labelWithString: "▤  " + (toolTip ?? "当前 PDF")); name.font = .systemFont(ofSize: 12)
+            name.lineBreakMode = .byTruncatingMiddle; name.widthAnchor.constraint(lessThanOrEqualToConstant: 180).isActive = true
+            let remove = NSButton(title: "×", target: self, action: #selector(togglePDF)); remove.isBordered = false; remove.toolTip = "移除当前 PDF"
+            let chip = NSStackView(views: [name, remove]); chip.orientation = .horizontal; chip.spacing = 5
+            chip.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 5)
+            chip.wantsLayer = true; chip.layer?.cornerRadius = 6; chip.layer?.borderWidth = 0.5; chip.layer?.borderColor = NSColor.separatorColor.cgColor
+            attachmentStack.addArrangedSubview(chip)
+        }
+        for image in attachments {
+            let chip = AIChatImageChip(attachment: image, removable: true, removeTitle: "移除图片")
+            chip.onRemove = { [weak self] in
+                self?.attachments.removeAll { $0.id == image.id }; self?.updateAttachments(); self?.draftChanged()
+            }
+            attachmentStack.addArrangedSubview(chip)
+        }
+        let hasAttachments = includePDF || !attachments.isEmpty
+        attachmentScroll.isHidden = !hasAttachments; attachmentHeight?.constant = hasAttachments ? 62 : 0
+        attachmentStack.layoutSubtreeIfNeeded()
+        let size = attachmentStack.fittingSize
+        attachmentStack.frame = NSRect(x: 0, y: 0, width: max(size.width, attachmentScroll.contentSize.width), height: 62)
+    }
     private func scrollToBottom() { let clip = messagesScroll.contentView; let h = messagesStack.frame.height; clip.scroll(to: NSPoint(x: 0, y: max(0, h - clip.bounds.height))); messagesScroll.reflectScrolledClipView(clip) }
     @objc private func addConversation() { onNewConversation?() }
     @objc private func selectConversation(_ sender: NSButton) { if let id = sender.identifier?.rawValue { onSelectConversation?(id) } }

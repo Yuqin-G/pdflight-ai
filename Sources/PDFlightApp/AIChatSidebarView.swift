@@ -2984,11 +2984,11 @@ private final class AIChatComposerTextView: NSTextView {
 }
 
 @MainActor
-private final class AIChatImageChip: NSView {
+final class AIChatImageChip: NSView {
     var onRemove: (() -> Void)?
     private let removeButton = NSButton()
 
-    init(attachment: AIChatImageAttachment, removable: Bool) {
+    init(attachment: AIChatImageAttachment, removable: Bool, removeTitle: String = "Remove image") {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 7
@@ -3007,13 +3007,13 @@ private final class AIChatImageChip: NSView {
         imageView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(imageView)
 
-        removeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove image")
+        removeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: removeTitle)
         removeButton.isBordered = false
         removeButton.contentTintColor = .secondaryLabelColor
         removeButton.target = self
         removeButton.action = #selector(removePressed(_:))
         removeButton.isHidden = !removable
-        removeButton.toolTip = "Remove image"
+        removeButton.toolTip = removeTitle
         removeButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(removeButton)
 
