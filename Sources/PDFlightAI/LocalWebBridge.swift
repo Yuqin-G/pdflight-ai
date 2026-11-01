@@ -56,6 +56,10 @@ public final class LocalWebBridge: @unchecked Sendable {
     public func ensureReady(for baseURL: String) async -> Bool {
         guard let endpoint = bridgeEndpoint(from: baseURL) else { return true }
         if await probe(endpoint) { return true }
+        // A caller may configure a different local OpenAI-compatible server.
+        // It need not implement uwa-lite's /health route; an HTTP response
+        // still proves that its port is occupied and must not be taken over.
+        if await responds(endpoint) { return true }
         let task: Task<Bool, Never> = lock.withLock {
             if let readinessTask { return readinessTask }
             let task = Task { await self.spawnAndWait(for: endpoint) }
@@ -75,6 +79,18 @@ public final class LocalWebBridge: @unchecked Sendable {
             return (response as? HTTPURLResponse).map {
                 (200..<300).contains($0.statusCode)
             } ?? false
+        } catch {
+            return false
+        }
+    }
+
+    public func responds(_ endpoint: Endpoint) async -> Bool {
+        guard let url = endpoint.healthURL else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.5
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            return response is HTTPURLResponse
         } catch {
             return false
         }

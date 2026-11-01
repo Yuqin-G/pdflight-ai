@@ -1,0 +1,3 @@
+- insert:
+    - id: pdflight-harness-chat
+      name: '@local/pdflight-harness-chat'

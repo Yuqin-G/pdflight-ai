@@ -5,6 +5,105 @@ import PDFlightCore
 @main
 enum PDFlightAIChecks {
     static func main() async throws {
+        if let index = CommandLine.arguments.firstIndex(of: "--inspect-staged-history"), CommandLine.arguments.count > index + 1 {
+            let directory = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+            let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+            let histories = try await AIChatHistoryStore(directoryURL: directory).allHistories()
+            guard files.count == histories.count else { throw CheckFailure(message: "some staged history files cannot be decoded") }
+            let messages = histories.flatMap(\.conversations).flatMap(\.messages)
+            print("decoded histories: \(histories.count); messages with reasoning: \(messages.filter { $0.reasoning != nil }.count); tool cards: \(messages.filter { $0.toolEvent != nil }.count)")
+            return
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--stage-harness-import"), CommandLine.arguments.count > index + 1 {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let data = home.appendingPathComponent("Documents/deepseek-harness/default-workspace/pdf-reading-mode/data")
+            let support = home.appendingPathComponent("Library/Application Support/dev.pdflight.reader")
+            let destination = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+            let result = try HarnessLibraryMigration.prepare(dataDirectory: data, sourceMappingsURL: support.appendingPathComponent("harness-bridge/paper-paths.json"), destination: destination)
+            let store = AIChatHistoryStore(directoryURL: destination.appendingPathComponent("ai-chats"))
+            var sessions = 0, messages = 0, drafts = 0
+            for target in result.targets {
+                let history = try await store.importHarnessIfNeeded(for: target.documentURL, dataDirectory: data, pathMappingsURL: result.mappingsURL,
+                    draftDirectory: support.appendingPathComponent("harness-draft-import"), recoveredArchivesDirectory: support.appendingPathComponent("harness-recovery"),
+                    projectionDirectory: home.appendingPathComponent(".dsh/storages/session_projcache/sessions"))
+                sessions += history.conversations.count
+                messages += history.conversations.reduce(0) { $0 + $1.messages.count }
+                drafts += history.conversations.filter { !($0.draft?.text.isEmpty ?? true) }.count
+            }
+            let legacyDirectory = support.appendingPathComponent("ai-chats", isDirectory: true)
+            let legacyBackup = destination.appendingPathComponent("legacy-originals", isDirectory: true)
+            try FileManager.default.createDirectory(at: legacyBackup, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            if FileManager.default.fileExists(atPath: legacyDirectory.path) {
+                for file in try FileManager.default.contentsOfDirectory(at: legacyDirectory, includingPropertiesForKeys: nil) where file.pathExtension == "json" {
+                    let copy = legacyBackup.appendingPathComponent(file.lastPathComponent)
+                    let raw = try Data(contentsOf: file)
+                    if FileManager.default.fileExists(atPath: copy.path) {
+                        guard try Data(contentsOf: copy) == raw else { throw CocoaError(.fileWriteFileExists) }
+                    } else {
+                        try raw.write(to: copy, options: .atomic)
+                        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: copy.path)
+                    }
+                }
+            }
+            let legacy = try await AIChatHistoryStore(directoryURL: legacyDirectory).allHistories()
+            for history in legacy {
+                _ = try await store.mergeLegacy(history, for: URL(fileURLWithPath: history.documentPath))
+            }
+            let nativeRoot = home.appendingPathComponent(".dsh/sessions", isDirectory: true)
+            let nativeBackup = destination.appendingPathComponent("harness-native-originals", isDirectory: true)
+            try FileManager.default.createDirectory(at: nativeBackup, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let groupsData = try Data(contentsOf: data.appendingPathComponent("conversations.json"))
+            let groupsObject = try JSONSerialization.jsonObject(with: groupsData) as? [String: Any]
+            let groups = groupsObject?["groups"] as? [[String: Any]] ?? []
+            let sessionIDs = Set(groups.flatMap { ($0["conversations"] as? [[String: Any]] ?? []).compactMap { $0["sessionId"] as? String } })
+            let workspaces = try FileManager.default.contentsOfDirectory(at: nativeRoot, includingPropertiesForKeys: nil)
+            var nativeCopies = 0
+            for id in sessionIDs {
+                guard id.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else { continue }
+                let sources = workspaces.map { $0.appendingPathComponent(id).appendingPathComponent("session.v4.jsonl.zstd") }.filter { FileManager.default.fileExists(atPath: $0.path) }
+                guard sources.count == 1, let source = sources.first else { continue }
+                let before = try source.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                let raw = try Data(contentsOf: source)
+                let after = try source.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                guard before.contentModificationDate == after.contentModificationDate && before.fileSize == after.fileSize else {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                let copy = nativeBackup.appendingPathComponent(id + ".jsonl.zstd")
+                if FileManager.default.fileExists(atPath: copy.path) {
+                    guard try Data(contentsOf: copy) == raw else { throw CocoaError(.fileWriteFileExists) }
+                } else {
+                    try raw.write(to: copy, options: .atomic)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: copy.path)
+                }
+                nativeCopies += 1
+            }
+            let manifest: [String: Any] = ["version": 1, "targets": result.targets.map { ["paperID": $0.paperID, "path": $0.documentURL.path, "copied": $0.copied] }, "unavailablePaperIDs": result.unavailablePaperIDs]
+            let manifestURL = destination.appendingPathComponent("manifest.json")
+            try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: manifestURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifestURL.path)
+            print("Harness paper targets: \(result.targets.count); copied PDFs: \(result.targets.filter(\.copied).count); sessions: \(sessions); messages: \(messages); drafts: \(drafts); original native sessions backed up: \(nativeCopies); missing paper associations: \(result.unavailablePaperIDs.count); legacy PDFlight histories merged: \(legacy.count)")
+            return
+        }
+        if CommandLine.arguments.contains("--inspect-harness-import") {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let data = home.appendingPathComponent("Documents/deepseek-harness/default-workspace/pdf-reading-mode/data")
+            let map = home.appendingPathComponent("Library/Application Support/dev.pdflight.reader/harness-bridge/paper-paths.json")
+            let mappings = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: map))
+            var prepared = 0, messages = 0, skipped = 0, missing = 0, failed = 0
+            for path in mappings.keys {
+                guard FileManager.default.fileExists(atPath: path) else { missing += 1; continue }
+                do {
+                    let result = try HarnessChatImport.prepare(documentURL: URL(fileURLWithPath: path), dataDirectory: data, pathMappingsURL: map)
+                    prepared += result.conversations.count
+                    messages += result.conversations.reduce(0) { $0 + $1.value.messages.count }
+                    skipped += result.skippedSessionIDs.count
+                } catch { failed += 1 }
+            }
+            print("papers: \(mappings.count), archives prepared: \(prepared), messages: \(messages), skipped: \(skipped), missing PDFs: \(missing), failures: \(failed)")
+            let settings = try HarnessModelImport.read(profile: home.appendingPathComponent(".dsh/profiles/desktop/cordis.patch.yml"), credentials: home.appendingPathComponent(".dsh/.credentials.yaml"))
+            print("selected provider: \(settings.provider); model: \(settings.configuration.model); endpoint: \(settings.configuration.baseURL); credential present: \(!settings.apiKey.isEmpty)")
+            return
+        }
         if CommandLine.arguments.contains("--validate-renderable-content") {
             try validateRenderableContentFromStandardInput()
             print("PASS: every detected formula is safe for native math rendering")
@@ -18,6 +117,15 @@ enum PDFlightAIChecks {
         print("PASS: streamed reasoning and answer text stay buffered until completion")
         try await chatHistorySupportsPortablePerPaperConversations()
         print("PASS: AI chat history is portable, grouped by paper, and supports multiple conversations")
+        try await harnessArchivesCanBePreparedWithoutChangingTheSource()
+        print("PASS: Harness archives are matched and prepared without losing their original data")
+        try harnessModelSettingsCanBeReadWithoutChangingTheSource()
+        print("PASS: Harness model selection and credential are read without changing the source")
+        try alternateModelProtocolsEncodeAndStream()
+        print("PASS: Responses and Anthropic routes send and decode their own streaming protocols")
+        let displayEvents = [AIChatMessage(role: .user, content: "question"), AIChatMessage(role: .tool, content: "private tool event"), AIChatMessage(role: .assistant, content: "", reasoning: "thinking"), AIChatMessage(role: .assistant, content: "answer")]
+        let requestEvents = AIChatRequestBuilder.messages(instruction: nil, paperContext: nil, conversation: displayEvents)
+        try check(requestEvents.map(\.role) == [.user, .assistant], "display-only tool and thinking events must not become fake model turns")
         try promptPresetsStartNewConversationsInReadingMode()
         print("PASS: new AI conversations start with no preset prompt")
         try await promptTemplatesAreEditableAndPortable()
@@ -42,6 +150,189 @@ enum PDFlightAIChecks {
         print("PASS: assistant replies recognize block Markdown")
         try await localWebBridgeEndpointsAndReadiness()
         print("PASS: local web bridge resolves loopback endpoints and skips remote providers")
+    }
+
+    private static func harnessArchivesCanBePreparedWithoutChangingTheSource() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let data = root.appendingPathComponent("data")
+        let chats = data.appendingPathComponent("chats")
+        try FileManager.default.createDirectory(at: chats, withIntermediateDirectories: true)
+        let originalPDF = root.appendingPathComponent("Paper.pdf")
+        let copyPDF = root.appendingPathComponent("library-copy.pdf")
+        try Data("first PDF".utf8).write(to: originalPDF)
+        try Data("first PDF".utf8).write(to: copyPDF)
+        func write(_ object: Any, _ url: URL) throws {
+            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: url)
+        }
+        try write(["papers": [["id": "paper-1", "title": "Paper.pdf", "path": copyPDF.path]]], data.appendingPathComponent("index.json"))
+        try write(["groups": [["paperId": "paper-1", "lastSessionId": "session-a", "conversations": [
+            ["sessionId": "session-a", "title": "Reading"], ["sessionId": "session-image"],
+            ["sessionId": "missing"], ["sessionId": "../escape"]
+        ]]]], data.appendingPathComponent("conversations.json"))
+        let archive: [String: Any] = ["sessionId": "session-a", "paperId": "paper-1", "title": "Reading", "provider": "test", "model": "sample", "status": "active", "createdAt": "2026-01-01T00:00:00.000Z", "entries": [
+            ["id": "m1", "role": "user", "time": 1_767_225_600_000, "text": "question", "content": [["type": "text", "text": "question"]]],
+            ["id": "m2", "role": "assistant", "time": 1_767_225_601_000, "text": "answer", "content": [["type": "text", "text": "answer"]]]
+        ], "web": ["conversationId": "preserve-this"]]
+        let archiveURL = chats.appendingPathComponent("session-a.json")
+        try write(archive, archiveURL)
+        try write(["sessionId": "session-image", "paperId": "paper-1", "entries": [["id": "x", "role": "user", "content": [["type": "image"]]]]], chats.appendingPathComponent("session-image.json"))
+        let raw = try Data(contentsOf: archiveURL)
+        let result = try HarnessChatImport.prepare(documentURL: originalPDF, dataDirectory: data, pathMappingsURL: nil)
+        try check(result.paperID == "paper-1" && result.activeSessionID == "session-a", "expected the exact PDF and selected session")
+        try check(result.conversations.count == 1 && result.conversations[0].value.messages.map(\.content) == ["question", "answer"], "expected complete text turns")
+        try check(result.conversations[0].sourceArchive == raw && result.conversations[0].provider == "test", "expected original archive and provider to be retained")
+        try check(Set(result.skippedSessionIDs) == Set(["session-image", "missing", "../escape"]), "expected unsupported, absent and unsafe sessions to be reported")
+        let unchanged = try Data(contentsOf: archiveURL)
+        try check(unchanged == raw, "import preparation must not modify Harness data")
+        let store = AIChatHistoryStore(directoryURL: root.appendingPathComponent("native-history"))
+        let firstImport = try await store.importHarness(result, for: originalPDF)
+        try check(firstImport.conversations.count == 1 && firstImport.activeConversationID == "session-a", "expected selected imported session without a blank duplicate")
+        let secondImport = try await store.importHarness(result, for: originalPDF)
+        try check(secondImport == firstImport, "repeat import must not duplicate or overwrite conversations")
+        let backup = store.storageDirectoryURL.appendingPathComponent("harness-originals")
+            .appendingPathComponent(store.fileURL(for: originalPDF).deletingPathExtension().lastPathComponent)
+            .appendingPathComponent("session-a.json")
+        let backupData = try Data(contentsOf: backup)
+        try check(backupData == raw, "expected the full original archive to be retained privately")
+        let drafts = root.appendingPathComponent("drafts")
+        try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
+        try write(["version": 1, "drafts": [["sessionId": "session-a", "draft": ["text": "unfinished draft", "references": []]]]], drafts.appendingPathComponent("capture.json"))
+        let draftStore = AIChatHistoryStore(directoryURL: root.appendingPathComponent("draft-history"))
+        var withDraft = try await draftStore.importHarnessIfNeeded(for: originalPDF, dataDirectory: data, pathMappingsURL: nil, draftDirectory: drafts)
+        try check(withDraft.conversations.first?.draft?.text == "unfinished draft", "expected captured desktop draft to migrate with its session")
+        withDraft.conversations[0].draft = AIChatDraft(text: "edited in native")
+        try await draftStore.save(withDraft, for: originalPDF)
+        let afterRestart = try await draftStore.importHarnessIfNeeded(for: originalPDF, dataDirectory: data, pathMappingsURL: nil, draftDirectory: drafts)
+        try check(afterRestart.conversations.first?.draft?.text == "edited in native", "old captured draft must never overwrite a newer native draft")
+        let latest = AIChatDraft(text: "line one\nline two")
+        try draftStore.saveDraft(latest, sessionID: "session-a", for: originalPDF)
+        let restoredDraft = try draftStore.readDraft(sessionID: "session-a", for: originalPDF)
+        try check(restoredDraft == latest, "native draft sidecar must preserve exact text and newlines")
+        do {
+            try draftStore.saveDraft(latest, sessionID: "../escape", for: originalPDF)
+            throw CheckFailure(message: "draft session ID must not allow directory traversal")
+        } catch let error as CocoaError where error.code == .fileReadInvalidFileName { }
+        var legacy = withDraft
+        legacy.conversations[0].messages.append(AIChatMessage(role: .user, content: "legacy-only turn"))
+        let mergedLegacy = try await draftStore.mergeLegacy(legacy, for: originalPDF)
+        let repeatedLegacy = try await draftStore.mergeLegacy(legacy, for: originalPDF)
+        try check(mergedLegacy.conversations.count == 2 && repeatedLegacy.conversations.count == 2, "conflicting legacy IDs must be preserved without duplication")
+        let mappings = root.appendingPathComponent("paths.json")
+        try write([originalPDF.path: "paper-1"], mappings)
+        try Data("modified PDF".utf8).write(to: originalPDF)
+        let mapped = try HarnessChatImport.prepare(documentURL: originalPDF, dataDirectory: data, pathMappingsURL: mappings)
+        try check(mapped.paperID == "paper-1", "expected the saved bridge mapping to survive PDF edits")
+        let unmatched = try HarnessChatImport.prepare(documentURL: originalPDF, dataDirectory: data, pathMappingsURL: nil)
+        try check(unmatched.paperID == nil, "different PDF bytes must not match by title alone")
+        let direct = try HarnessChatImport.prepare(documentURL: copyPDF, dataDirectory: data, pathMappingsURL: nil)
+        try check(direct.paperID == "paper-1", "the Harness library copy must match by path even when its filename is an ID")
+        let portable = root.appendingPathComponent("portable")
+        let prepared = try HarnessLibraryMigration.prepare(dataDirectory: data, sourceMappingsURL: nil, destination: portable)
+        try check(prepared.targets.count == 1 && prepared.targets[0].copied, "an unmapped Harness paper must get an independent PDF copy")
+        let copied = try Data(contentsOf: prepared.targets[0].documentURL)
+        try check(copied == Data("first PDF".utf8), "portable PDF bytes must match the original")
+        let second = try HarnessLibraryMigration.prepare(dataDirectory: data, sourceMappingsURL: nil, destination: portable)
+        try check(second.targets[0].documentURL == prepared.targets[0].documentURL, "portable paper copy must be idempotent")
+        let copiedHistory = try HarnessChatImport.prepare(documentURL: prepared.targets[0].documentURL, dataDirectory: data, pathMappingsURL: prepared.mappingsURL)
+        try check(copiedHistory.conversations.count == 1, "portable PDF must retain its Harness conversation mapping")
+        let recovered = root.appendingPathComponent("recovered")
+        try FileManager.default.createDirectory(at: recovered.appendingPathComponent("chats"), withIntermediateDirectories: true)
+        try write(["sessionId": "missing", "paperId": "paper-1", "entries": [["id": "recovered-message", "role": "user", "text": "recovered turn", "content": [["type": "text", "text": "recovered turn"]]]]], recovered.appendingPathComponent("chats/missing.json"))
+        let withRecovery = try HarnessChatImport.prepare(documentURL: copyPDF, dataDirectory: data, pathMappingsURL: nil, recoveredArchivesDirectory: recovered)
+        try check(withRecovery.conversations.contains { $0.value.id == "missing" && $0.value.messages.first?.content == "recovered turn" }, "a recovered native-session archive must be imported when the original archive is missing")
+        let projections = root.appendingPathComponent("projections")
+        try FileManager.default.createDirectory(at: projections, withIntermediateDirectories: true)
+        try write(["record": ["rows": ["modelSelection": ["val": ["lastUsed": ["provider": "new-provider", "model": "new-model", "reasoningEffort": "high"]]]]]], projections.appendingPathComponent("session-a.json"))
+        let selectedModel = try HarnessChatImport.prepare(documentURL: copyPDF, dataDirectory: data, pathMappingsURL: nil, projectionDirectory: projections)
+        try check(selectedModel.conversations.first?.value.modelRouteID == "new-provider/new-model" && selectedModel.conversations.first?.value.reasoningEffort == "high", "latest per-session model and reasoning setting must survive migration")
+    }
+
+    private static func harnessModelSettingsCanBeReadWithoutChangingTheSource() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let profile = root.appendingPathComponent("profile.yml"), credentials = root.appendingPathComponent("credentials.yml")
+        let yaml = """
+        - id: agent-default-model
+          config:
+            provider: test-provider
+            model: test-model
+        - id: llm-pi-ai
+          config:
+            providers:
+              test-provider:
+                api: openai-completions
+                baseURL: http://127.0.0.1:3425/v1
+                apiKeyEnv: PDFLIGHT_FIXTURE_MISSING_KEY
+                models:
+                  - id: test-model
+                    name: Test model
+              responses-provider:
+                api: openai-responses
+                baseURL: http://127.0.0.1:3425/v1
+                models:
+                  - id: responses-model
+                    name: Responses model
+              anthropic-provider:
+                api: anthropic-messages
+                baseURL: http://127.0.0.1:3425
+                models:
+                  - id: anthropic-model
+                    name: Anthropic model
+                    maxTokens: 65500
+        """
+        try yaml.write(to: profile, atomically: true, encoding: .utf8)
+        try "refs:\n  PDFLIGHT_FIXTURE_MISSING_KEY: fixture-secret\n".write(to: credentials, atomically: true, encoding: .utf8)
+        let selected = try HarnessModelImport.read(profile: profile, credentials: credentials)
+        try check(selected.provider == "test-provider" && selected.configuration.model == "test-model", "expected configured default model")
+        try check(selected.configuration.baseURL == "http://127.0.0.1:3425/v1" && selected.apiKey == "fixture-secret", "expected selected gateway and credential")
+        let catalog = try HarnessModelImport.readCatalog(profile: profile, credentials: credentials)
+        try check(catalog.routes.count == 3 && catalog.selectedID == "test-provider/test-model", "expected all model routes and the selected model")
+        try check(catalog.routes.allSatisfy(\.isSupported) && catalog.secrets["test-provider"] == "fixture-secret", "expected supported protocols and private provider credential")
+        try check(catalog.routes.first(where: { $0.model == "anthropic-model" })?.maxTokens == 65500, "model output limit must be imported")
+        let unsupported = yaml.replacingOccurrences(of: "openai-completions", with: "anthropic-messages")
+        try unsupported.write(to: profile, atomically: true, encoding: .utf8)
+        do {
+            _ = try HarnessModelImport.read(profile: profile, credentials: credentials)
+            throw CheckFailure(message: "unsupported protocols must not silently use OpenAI requests")
+        } catch HarnessModelImport.ImportError.unsupportedAPI("anthropic-messages") { }
+    }
+
+    private static func alternateModelProtocolsEncodeAndStream() throws {
+        let client = OpenAICompatibleClient()
+        let messages = [AIChatMessage(role: .system, content: "system"), AIChatMessage(role: .user, content: "hello")]
+        let completion = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425/v1", model: "mock", maxTokens: 48000), apiKey: "test")
+        let completionBody = try JSONSerialization.jsonObject(with: completion.httpBody!) as! [String: Any]
+        try check(completionBody["max_tokens"] as? Int == 48000, "completion output limit must survive")
+        let response = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425/v1", model: "mock", api: "openai-responses", reasoningEffort: "high", maxTokens: 64000), apiKey: "test")
+        try check(response.url?.path == "/v1/responses" && response.value(forHTTPHeaderField: "Authorization") == "Bearer test", "Responses route must use its own endpoint and auth")
+        let responseBody = try JSONSerialization.jsonObject(with: response.httpBody!) as! [String: Any]
+        try check(responseBody["max_output_tokens"] as? Int == 64000, "Responses output limit must survive")
+        try check(responseBody["input"] != nil && responseBody["messages"] == nil, "Responses input must use the right schema")
+        try check((responseBody["reasoning"] as? [String: String])?["effort"] == "high", "Responses reasoning effort must survive")
+        var decoder = OpenAIStreamDecoder(api: "openai-responses")
+        let responseDelta = try decoder.decode(line: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"one\"}")
+        try check(responseDelta == .contentDelta("one"), "Responses text deltas must stream")
+        let anthropic = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425", model: "mock", api: "anthropic-messages", reasoningEffort: "max", forceAdaptiveThinking: true, maxTokens: 65500), apiKey: "test")
+        try check(anthropic.url?.path == "/v1/messages" && anthropic.value(forHTTPHeaderField: "x-api-key") == "test", "Anthropic route must use its own endpoint and auth")
+        let anthropicBody = try JSONSerialization.jsonObject(with: anthropic.httpBody!) as! [String: Any]
+        try check(anthropicBody["system"] as? String == "system" && anthropicBody["max_tokens"] as? Int == 65500, "Anthropic system prompt and configured output limit must be supplied")
+        try check((anthropicBody["output_config"] as? [String: String])?["effort"] == "max" && (anthropicBody["thinking"] as? [String: String])?["type"] == "adaptive", "Anthropic reasoning effort and adaptive thinking must survive")
+        var other = OpenAIStreamDecoder(api: "anthropic-messages")
+        let anthropicDelta = try other.decode(line: "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"two\"}}")
+        try check(anthropicDelta == .contentDelta("two"), "Anthropic text deltas must stream")
+        let pdf = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        defer { try? FileManager.default.removeItem(at: pdf) }
+        try Data("pdf fixture".utf8).write(to: pdf)
+        let withFile = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425/v1", model: "mock", api: "openai-responses"), apiKey: "test", currentPDFURL: pdf)
+        let fileBody = try JSONSerialization.jsonObject(with: withFile.httpBody!) as! [String: Any]
+        let input = fileBody["input"] as! [[String: Any]]; let content = input.last!["content"] as! [[String: Any]]
+        try check(content.contains { $0["type"] as? String == "input_file" }, "Responses must carry the explicitly attached PDF")
+        let anthropicFile = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425", model: "mock", api: "anthropic-messages"), apiKey: "test", currentPDFURL: pdf)
+        let aBody = try JSONSerialization.jsonObject(with: anthropicFile.httpBody!) as! [String: Any]
+        let turns = aBody["messages"] as! [[String: Any]]; let blocks = turns.last!["content"] as! [[String: Any]]
+        try check(blocks.contains { $0["type"] as? String == "document" }, "Anthropic must carry the explicitly attached PDF")
     }
 
     private static func validateRenderableContentFromStandardInput() throws {
@@ -310,12 +601,12 @@ enum PDFlightAIChecks {
             mimeType: "image/png",
             data: Data([0x89, 0x50, 0x4E, 0x47])
         )
-        let message = AIChatMessage(role: .user, content: "Explain this diagram", imageAttachments: [image])
+        let message = AIChatMessage(role: .user, content: "Explain this diagram", imageAttachments: [image], pdfAttachmentName: "paper.pdf")
         let roundTrip = try JSONDecoder().decode(
             AIChatMessage.self,
             from: JSONEncoder().encode(message)
         )
-        try check(roundTrip == message, "expected image data to survive portable JSON history")
+        try check(roundTrip == message, "expected image data and PDF attachment name to survive portable JSON history")
 
         let client = OpenAICompatibleClient()
         let configuration = AIProviderConfiguration(baseURL: "https://example.com/v1", model: "vision-model")
@@ -497,6 +788,10 @@ enum PDFlightAIChecks {
             ) == nil,
             "expected standard providers to receive no Universal Web API extension"
         )
+        let gatewayQwen = AIProviderConfiguration(baseURL: "http://127.0.0.1:3425/v1", model: "uwa-lite-local/qwen")
+        try check(AIConversationRouting.conversationKey(for: "local-a", configuration: gatewayQwen) == "pdflight:conversation:local-a", "the migrated Magpie Qwen route must retain a per-conversation web binding")
+        let unrelated = AIProviderConfiguration(baseURL: "http://127.0.0.1:3425/v1", model: "other/qwen")
+        try check(AIConversationRouting.conversationKey(for: "local-a", configuration: unrelated) == nil, "unrelated gateway models must not receive the Qwen-only binding")
     }
 
     private static func openAIStreamDecoderSeparatesReasoningFromFinalContent() throws {
@@ -824,6 +1119,13 @@ enum PDFlightAIChecks {
             deadPortReady == false,
             "expected probing an unused port to report not-ready"
         )
+        if let value = ProcessInfo.processInfo.environment["PDFLIGHT_TEST_HTTP_PORT"], let port = Int(value) {
+            let otherService = LocalWebBridge.Endpoint(scheme: "http", host: "127.0.0.1", port: port)
+            let healthy = await bridge.probe(otherService)
+            let listening = await bridge.responds(otherService)
+            let ready = await bridge.ensureReady(for: "http://127.0.0.1:\(port)/v1")
+            try check(!healthy && listening && ready, "a local API returning 404 for /health must not cause uwa-lite to start")
+        }
     }
 
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {

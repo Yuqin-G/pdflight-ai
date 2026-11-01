@@ -50,6 +50,8 @@ cp "$PROJECT_ROOT/.build/checkouts/iosMath/LICENSE" \
     "$STAGING_APP/Contents/Resources/ThirdParty/iosMath-LICENSE.txt"
 cp "$PROJECT_ROOT/.build/checkouts/iosMath/iosMath/fonts/GUST-FONT-LICENSE.txt" \
     "$STAGING_APP/Contents/Resources/ThirdParty/GUST-FONT-LICENSE.txt"
+cp "$PROJECT_ROOT/.build/checkouts/Yams/LICENSE" \
+    "$STAGING_APP/Contents/Resources/ThirdParty/Yams-LICENSE.txt"
 codesign --force --deep --sign - "$STAGING_APP" >/dev/null
 
 rm -rf "$APP_ROOT"

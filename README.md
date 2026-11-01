@@ -8,14 +8,7 @@
   <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-PDFlight AI is an extremely light, native macOS paper reader with an integrated **Ask PDF** workspace. It combines an AppKit interface and PDF-only MuPDF engine with per-paper AI conversations, editable prompt modes, and native Markdown/LaTeX rendering—without a web view, embeddings, or RAG.
-
-**Extremely Light**
-
-| Open PDFs | PDFlight | Skim |
-| ---: | ---: | ---: |
-| 10 | 165.2 MiB | 934.6 MiB |
-| 30 | 338.2 MiB | 2,595.6 MiB |
+PDFlight AI is a native macOS PDF reader with an **Ask PDF** workspace. The reader uses AppKit and MuPDF; the sidebar embeds the PDF-reading conversation from the local DeepSeek Harness, including its theme, sessions, models, and reading prompts.
 
 Current features:
 
@@ -36,22 +29,16 @@ Current features:
 - text-aligned highlights written back as standard PDF annotations;
 - embedded PDF text-note annotations;
 - Command-Z undo for the most recent highlight or text note;
-- a native **Ask PDF** sidebar with buffered streaming, a workspace-wide remembered width and visibility, horizontal per-paper conversation tabs, adjustable and selectable reply text, editable prompt-mode buttons, native block Markdown/LaTeX rendering, and per-message copy/delete actions;
+- the actual DeepSeek Harness PDF-reading conversation as the **Ask PDF** sidebar, with per-paper session tabs, models, prompts, attachments, and the active Harness theme;
 - direct save with a close-time unsaved-changes warning.
 
 ## Ask PDF
 
-The AI sidebar opens by default and can be resized by dragging its divider. Its width and visibility are shared by every open paper and restored on the next launch, together with the reader window frame. Optional reply-list gesture zoom is disabled by default; enable it in AI Settings to pinch or Command-scroll over replies without resizing the composer or controls. The same panel can open the portable chat-history folder directly in Finder. A **+** button immediately after the conversation tabs creates another conversation for the current paper. Use **Shift-Command-A** to hide or show the sidebar, then use the gear button to enter an OpenAI-compatible Base URL, model, and optional API key. OpenAI, OpenRouter, DeepSeek, Ollama, and LM Studio-style chat-completions endpoints are supported.
+The sidebar embeds the PDF-reading panel from a running DeepSeek Harness Desktop. Install Harness with the `@local/pdf-reading-mode` plugin enabled. If the connection bridge has not been installed, choose **安装连接插件** in the sidebar; the bridge is also installable with `node scripts/install-harness-bridge.mjs`. It joins the existing desktop profile and does not start a separate Harness session store.
 
-PDFlight receives streaming responses in the background while showing live activity state, then inserts and renders the complete Markdown/LaTeX answer once generation finishes. This avoids repeatedly laying out unfinished tables and formulas. If generation is stopped or the connection fails, any answer text already received is retained as a partial reply.
+The current PDF is matched to a Harness library copy by content, or imported on first use. A saved source-path association keeps the conversation attached after the PDF is annotated. Harness manages models, sessions, rendering, reading prompts and its active theme; the sidebar keeps PDFlight's shared width and visibility. Use **Shift-Command-A** to hide or show it.
 
-Every new conversation starts with **No prompt**. Prompt modes appear as buttons below the composer: click **Reading** to enable its saved Chinese deep-reading prompt. Use the adjacent menu to edit No prompt or Reading, or add another mode. Templates are portable JSON and support `{{title}}` for the current PDF title. No mode automatically appends PDF pages.
-
-Conversations for the current PDF appear as stable horizontal tabs. The smaller/larger text controls adjust and remember reply text size without changing the composer. Replies use the same macOS system-font stack as Argus—SF Pro with the native Chinese fallback and SF Mono for code. Sending with Return keeps the active tab and newest message visible.
-
-Each PDF tab owns its own chat area and can contain multiple conversations. The history button groups conversations by paper and can reveal the files in Finder. History uses pretty-printed, versioned UTF-8 JSON—one file per paper—under `~/Library/Application Support/dev.pdflight.reader/ai-chats`, so it can be backed up or migrated without a database. Assistant replies render native headings, lists, quotes, tables, fenced code, bold/italic Markdown, and LaTeX math, including Unicode labels inside `\text{…}`. Emphasis can span inline equations, inline equations stay embedded in their surrounding paragraph, and wide display equations scroll horizontally instead of being clipped. Reply text is selectable. Every user/assistant card has copy at both the top and bottom, plus a confirmed delete action that updates local history.
-
-The AI feature stays deliberately small: it does not build embeddings, run RAG, expose MCP tools, automatically capture or upload PDF pages, or use a web view. Images are sent only when the user explicitly pastes, drops, or attaches them. API keys are stored in macOS Keychain.
+When an existing PDFlight history contains supported text messages, the bridge imports those messages into native Harness sessions when the paper is opened. Image attachments and unsupported record formats are left in the original `~/Library/Application Support/dev.pdflight.reader/ai-chats` files and the sidebar reports that the records were retained. Original files are never deleted. The embedded panel uses WebKit and shares the running Harness host, so its memory use differs from earlier native-sidebar releases.
 
 ## Paper library
 

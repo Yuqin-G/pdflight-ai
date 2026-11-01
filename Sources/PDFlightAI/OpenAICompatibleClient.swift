@@ -39,7 +39,7 @@ public struct OpenAICompatibleClient: Sendable {
                         )
                     }
 
-                    var decoder = OpenAIStreamDecoder()
+                    var decoder = OpenAIStreamDecoder(api: configuration.api)
                     for try await line in bytes.lines {
                         try Task.checkCancellation()
                         guard let event = try decoder.decode(line: line) else { continue }
@@ -74,6 +74,9 @@ public struct OpenAICompatibleClient: Sendable {
         guard !model.isEmpty else {
             throw OpenAICompatibleError.invalidConfiguration("Enter a model in AI Settings.")
         }
+        if configuration.api != "openai-completions" {
+            return try makeAlternateRequest(messages: messages, configuration: configuration, apiKey: apiKey, currentPDFURL: currentPDFURL)
+        }
         let endpoint = try endpointURL(from: configuration.baseURL)
         if currentPDFURL != nil {
             let host = endpoint.host?.lowercased() ?? ""
@@ -96,6 +99,8 @@ public struct OpenAICompatibleClient: Sendable {
             model: model,
             messages: messages.map(RequestMessage.init),
             stream: true,
+            reasoningEffort: configuration.reasoningEffort,
+            maxTokens: configuration.maxTokens.flatMap { $0 > 0 ? $0 : nil },
             conversationKey: conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines),
             conversationTitle: conversationTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
             pdfAttachments: currentPDFURL.map {
@@ -106,6 +111,74 @@ public struct OpenAICompatibleClient: Sendable {
                 )]
             }
         ))
+        return request
+    }
+
+    private func makeAlternateRequest(messages: [AIChatMessage], configuration: AIProviderConfiguration, apiKey: String, currentPDFURL: URL?) throws -> URLRequest {
+        guard ["openai-responses", "anthropic-messages"].contains(configuration.api) else {
+            throw OpenAICompatibleError.invalidConfiguration("Unsupported model API: \(configuration.api)")
+        }
+        guard var components = URLComponents(string: configuration.baseURL),
+              let host = components.host?.lowercased(), let scheme = components.scheme?.lowercased(),
+              scheme == "https" || (scheme == "http" && ["127.0.0.1", "localhost", "::1"].contains(host)) else {
+            throw OpenAICompatibleError.invalidConfiguration("Use HTTPS, or HTTP only for localhost AI services.")
+        }
+        let oldPath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let ending = configuration.api == "openai-responses" ? "responses" : "messages"
+        let prefix = oldPath.isEmpty && configuration.api == "anthropic-messages" ? "v1" : oldPath
+        if !prefix.hasSuffix(ending) { components.path = "/" + [prefix, ending].filter { !$0.isEmpty }.joined(separator: "/") }
+        guard let url = components.url else { throw OpenAICompatibleError.invalidConfiguration("Invalid model endpoint.") }
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 300
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lastUserID = messages.last(where: { $0.role == .user })?.id
+        if let currentPDFURL,
+           let size = try currentPDFURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           size > 100 * 1_024 * 1_024 {
+            throw OpenAICompatibleError.invalidConfiguration("PDF 附件超过 100 MB，请先缩小文件。")
+        }
+        let pdfData = try currentPDFURL.map { try Data(contentsOf: $0) }
+        guard pdfData == nil || lastUserID != nil else {
+            throw OpenAICompatibleError.invalidConfiguration("PDF 附件需要一条用户消息。")
+        }
+        if configuration.api == "anthropic-messages" {
+            if !key.isEmpty { request.setValue(key, forHTTPHeaderField: "x-api-key") }
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            let turns: [[String: Any]] = messages.filter { $0.role != .system }.map { message in
+                var content: [[String: Any]] = []
+                if !message.content.isEmpty { content.append(["type": "text", "text": message.content]) }
+                for image in message.imageAttachments {
+                    content.append(["type": "image", "source": ["type": "base64", "media_type": image.mimeType, "data": image.data.base64EncodedString()]])
+                }
+                if message.id == lastUserID, let pdfData {
+                    content.append(["type": "document", "source": ["type": "base64", "media_type": "application/pdf", "data": pdfData.base64EncodedString()]])
+                }
+                return ["role": message.role.rawValue, "content": content]
+            }
+            let system = messages.filter { $0.role == .system }.map(\.content).joined(separator: "\n\n")
+            var body: [String: Any] = ["model": configuration.model, "max_tokens": max(1, configuration.maxTokens ?? 4096), "stream": true, "system": system, "messages": turns]
+            if let effort = configuration.reasoningEffort, effort != "off" { body["output_config"] = ["effort": effort] }
+            if configuration.forceAdaptiveThinking == true { body["thinking"] = ["type": "adaptive"] }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } else {
+            if !key.isEmpty { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+            let input: [[String: Any]] = messages.map { message in
+                let includesPDF = message.id == lastUserID && pdfData != nil
+                guard !message.imageAttachments.isEmpty || includesPDF else { return ["role": message.role.rawValue, "content": message.content] }
+                var content: [[String: Any]] = []
+                if !message.content.isEmpty { content.append(["type": "input_text", "text": message.content]) }
+                for image in message.imageAttachments { content.append(["type": "input_image", "image_url": "data:\(image.mimeType);base64,\(image.data.base64EncodedString())"]) }
+                if includesPDF, let pdfData, let currentPDFURL {
+                    content.append(["type": "input_file", "filename": currentPDFURL.lastPathComponent, "file_data": "data:application/pdf;base64,\(pdfData.base64EncodedString())"])
+                }
+                return ["role": message.role.rawValue, "content": content]
+            }
+            var body: [String: Any] = ["model": configuration.model, "stream": true, "input": input]
+            if let maxTokens = configuration.maxTokens, maxTokens > 0 { body["max_output_tokens"] = maxTokens }
+            if let effort = configuration.reasoningEffort, effort != "off" { body["reasoning"] = ["effort": effort] }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
         return request
     }
 
@@ -148,6 +221,8 @@ private struct RequestBody: Encodable {
     let model: String
     let messages: [RequestMessage]
     let stream: Bool
+    let reasoningEffort: String?
+    let maxTokens: Int?
     let conversationKey: String?
     let conversationTitle: String?
     let pdfAttachments: [RequestPDFAttachment]?
@@ -156,6 +231,8 @@ private struct RequestBody: Encodable {
         case model
         case messages
         case stream
+        case reasoningEffort = "reasoning_effort"
+        case maxTokens = "max_tokens"
         case conversationKey = "conversation_key"
         case conversationTitle = "conversation_title"
         case pdfAttachments = "pdf_attachments"

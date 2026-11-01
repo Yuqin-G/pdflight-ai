@@ -84,26 +84,27 @@ public struct KeychainError: Error, LocalizedError, Sendable {
 
 @MainActor
 public final class AIConfigurationStore {
-    private enum Key {
-        static let baseURL = "ai.openaiCompatible.baseURL"
-        static let model = "ai.openaiCompatible.model"
-    }
-
     private let userDefaults: UserDefaults
     private let secretStore: any AISecretStore
+    private let keyPrefix: String
+    private let catalogSecretsService: String
 
     public init(
         userDefaults: UserDefaults = .standard,
-        secretStore: any AISecretStore = KeychainAISecretStore()
+        secretStore: any AISecretStore = KeychainAISecretStore(),
+        keyPrefix: String = "ai.openaiCompatible",
+        catalogSecretsService: String = "dev.pdflight.reader.native-ai"
     ) {
         self.userDefaults = userDefaults
         self.secretStore = secretStore
+        self.keyPrefix = keyPrefix
+        self.catalogSecretsService = catalogSecretsService
     }
 
     public func configuration() -> AIProviderConfiguration {
         AIProviderConfiguration(
-            baseURL: userDefaults.string(forKey: Key.baseURL) ?? "https://api.openai.com/v1",
-            model: userDefaults.string(forKey: Key.model) ?? ""
+            baseURL: userDefaults.string(forKey: keyPrefix + ".baseURL") ?? "https://api.openai.com/v1",
+            model: userDefaults.string(forKey: keyPrefix + ".model") ?? ""
         )
     }
 
@@ -112,8 +113,28 @@ public final class AIConfigurationStore {
     }
 
     public func save(configuration: AIProviderConfiguration, apiKey: String) throws {
-        userDefaults.set(configuration.baseURL, forKey: Key.baseURL)
-        userDefaults.set(configuration.model, forKey: Key.model)
         try secretStore.saveAPIKey(apiKey)
+        userDefaults.set(configuration.baseURL, forKey: keyPrefix + ".baseURL")
+        userDefaults.set(configuration.model, forKey: keyPrefix + ".model")
+    }
+
+    public func importCatalogIfNeeded(_ catalog: HarnessModelImport.Catalog) throws {
+        guard userDefaults.data(forKey: keyPrefix + ".modelRoutes") == nil else { return }
+        for (provider, secret) in catalog.secrets {
+            try KeychainAISecretStore(service: catalogSecretsService, account: "provider:" + provider).saveAPIKey(secret)
+        }
+        userDefaults.set(try JSONEncoder().encode(catalog.routes), forKey: keyPrefix + ".modelRoutes")
+        userDefaults.set(catalog.selectedID, forKey: keyPrefix + ".defaultRoute")
+    }
+
+    public func modelRoutes() -> [HarnessModelImport.Route] {
+        guard let data = userDefaults.data(forKey: keyPrefix + ".modelRoutes") else { return [] }
+        return (try? JSONDecoder().decode([HarnessModelImport.Route].self, from: data)) ?? []
+    }
+
+    public func defaultRouteID() -> String? { userDefaults.string(forKey: keyPrefix + ".defaultRoute") }
+
+    public func apiKey(for route: HarnessModelImport.Route) throws -> String {
+        try KeychainAISecretStore(service: catalogSecretsService, account: "provider:" + route.provider).loadAPIKey()
     }
 }

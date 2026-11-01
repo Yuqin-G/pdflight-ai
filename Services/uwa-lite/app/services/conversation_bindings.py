@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$")
@@ -42,17 +42,23 @@ def is_conversation_url(route_domain: str, url: object) -> bool:
         return False
     host = str(parsed.hostname or "").strip().lower()
     path = str(parsed.path or "")
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return False
     if host != domain and not host.endswith(f".{domain}"):
         return False
     if domain in {"chat.qwen.ai", "www.chat.qwen.ai"}:
-        return bool(re.fullmatch(r"/c/[^/?#]+/?", path))
+        return bool(re.fullmatch(r"/(?:c|chat)/(?!guest/?$)[A-Za-z0-9_-]+/?", path))
     return path not in {"", "/"}
 
 
 def continuation_messages(messages: object) -> list[dict[str, Any]]:
     source = messages if isinstance(messages, list) else []
     for message in reversed(source):
-        if isinstance(message, dict) and str(message.get("role") or "").strip().lower() == "user":
+        if (
+            isinstance(message, dict)
+            and str(message.get("role") or "").strip().lower() == "user"
+            and str(message.get("name") or "").strip() != "dsh_context"
+        ):
             return [dict(message)]
     return []
 
@@ -156,6 +162,10 @@ class ConversationBindingStore:
         if not normalized_domain or not normalized_url:
             raise ValueError("route_domain and conversation_url are required")
 
+        if not is_conversation_url(normalized_domain, normalized_url):
+            raise ValueError("A durable HTTPS conversation URL is required")
+        parsed = urlparse(normalized_url)
+        normalized_url = urlunparse((parsed.scheme, parsed.hostname, parsed.path.rstrip("/"), "", "", ""))
         self._ensure_schema()
         now = time.time()
         with self._connect() as connection:
@@ -249,6 +259,22 @@ def plan_bound_request(
     )
 
 
+def conversation_metadata(key: str, url: object = None, state: str = "pending") -> dict[str, Any]:
+    """Public binding data only; never include query strings or browser credentials."""
+    raw = str(url or "").strip()
+    safe_url = None
+    if is_conversation_url("chat.qwen.ai", raw):
+        parsed = urlparse(raw)
+        safe_url = urlunparse(("https", parsed.hostname, parsed.path.rstrip("/"), "", "", ""))
+    return {
+        "conversation_key": key,
+        "client_session_id": key,
+        "conversation_id": safe_url.rsplit("/", 1)[-1] if safe_url else None,
+        "conversation_url": safe_url,
+        "conversation_state": state if safe_url else "pending",
+    }
+
+
 conversation_binding_store = ConversationBindingStore(
     os.getenv("CONVERSATION_BINDINGS_DB", "config/conversation_bindings.sqlite3")
 )
@@ -260,6 +286,7 @@ __all__ = [
     "BoundConversationPlan",
     "continuation_messages",
     "conversation_binding_store",
+    "conversation_metadata",
     "is_conversation_url",
     "normalize_conversation_key",
     "normalize_conversation_title",

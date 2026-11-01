@@ -24,7 +24,7 @@ from typing import Optional, Any, Dict, List, Callable, AsyncIterator
 
 from fastapi import APIRouter, Request, HTTPException, Header, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.core.config import _request_context, get_logger, SSEFormatter
 from app.core import get_browser
@@ -487,7 +487,7 @@ class ChatRequest(BaseModel):
     function_call: Optional[Any] = Field(default=None)
     preset_name: Optional[str] = Field(default=None)
     stream_options: Optional[dict] = Field(default=None)
-    conversation_key: Optional[str] = Field(default=None, max_length=200)
+    conversation_key: Optional[str] = Field(default=None, max_length=200, validation_alias=AliasChoices("conversation_key", "client_session_id", "clientSessionId", "session_id"))
     conversation_title: Optional[str] = Field(default=None, max_length=120)
     reuse_current_conversation: Optional[bool] = Field(default=False)
     pdf_attachments: Optional[list] = Field(default=None)

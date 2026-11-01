@@ -4,6 +4,17 @@ public enum AIChatRole: String, Codable, Sendable, Equatable {
     case system
     case user
     case assistant
+    case tool
+}
+
+public struct AIChatToolEvent: Codable, Sendable, Equatable {
+    public var name: String
+    public var arguments: String
+    public var result: String?
+    public var isError: Bool
+    public init(name: String, arguments: String, result: String? = nil, isError: Bool = false) {
+        self.name = name; self.arguments = arguments; self.result = result; self.isError = isError
+    }
 }
 
 public struct AIChatImageAttachment: Codable, Sendable, Equatable, Identifiable {
@@ -86,6 +97,9 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
     public let role: AIChatRole
     public var content: String
     public var imageAttachments: [AIChatImageAttachment]
+    public var pdfAttachmentName: String?
+    public var reasoning: String?
+    public var toolEvent: AIChatToolEvent?
     public let createdAt: Date
 
     public init(
@@ -93,17 +107,23 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         role: AIChatRole,
         content: String,
         imageAttachments: [AIChatImageAttachment] = [],
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        reasoning: String? = nil,
+        toolEvent: AIChatToolEvent? = nil,
+        pdfAttachmentName: String? = nil
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.imageAttachments = imageAttachments
+        self.pdfAttachmentName = pdfAttachmentName
         self.createdAt = createdAt
+        self.reasoning = reasoning
+        self.toolEvent = toolEvent
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, imageAttachments, createdAt
+        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName
     }
 
     public init(from decoder: Decoder) throws {
@@ -115,7 +135,10 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
             [AIChatImageAttachment].self,
             forKey: .imageAttachments
         ) ?? []
+        pdfAttachmentName = try container.decodeIfPresent(String.self, forKey: .pdfAttachmentName)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
+        reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
+        toolEvent = try container.decodeIfPresent(AIChatToolEvent.self, forKey: .toolEvent)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -126,7 +149,10 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         if !imageAttachments.isEmpty {
             try container.encode(imageAttachments, forKey: .imageAttachments)
         }
+        try container.encodeIfPresent(pdfAttachmentName, forKey: .pdfAttachmentName)
         try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(reasoning, forKey: .reasoning)
+        try container.encodeIfPresent(toolEvent, forKey: .toolEvent)
     }
 }
 
@@ -137,6 +163,11 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
     public var messages: [AIChatMessage]
     public let createdAt: Date
     public var updatedAt: Date
+    public var draft: AIChatDraft?
+    public var modelRouteID: String?
+    public var webConversationKey: String?
+    public var webConversationURL: String?
+    public var reasoningEffort: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -144,7 +175,12 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
         promptPreset: AIPromptPreset = .defaultForNewConversation,
         messages: [AIChatMessage] = [],
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        draft: AIChatDraft? = nil,
+        modelRouteID: String? = nil,
+        webConversationKey: String? = nil,
+        webConversationURL: String? = nil,
+        reasoningEffort: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -152,6 +188,20 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
         self.messages = messages
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.draft = draft
+        self.modelRouteID = modelRouteID
+        self.webConversationKey = webConversationKey
+        self.webConversationURL = webConversationURL
+        self.reasoningEffort = reasoningEffort
+    }
+}
+
+public struct AIChatDraft: Codable, Sendable, Equatable {
+    public var text: String
+    public var imageAttachments: [AIChatImageAttachment]
+    public var includeCurrentPDF: Bool
+    public init(text: String = "", imageAttachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false) {
+        self.text = text; self.imageAttachments = imageAttachments; self.includeCurrentPDF = includeCurrentPDF
     }
 }
 
@@ -194,9 +244,28 @@ public struct AIPaperChatHistory: Codable, Sendable, Equatable, Identifiable {
 public struct AIProviderConfiguration: Codable, Sendable, Equatable {
     public var baseURL: String
     public var model: String
+    public var api: String
+    public var reasoningEffort: String?
+    public var forceAdaptiveThinking: Bool?
+    public var maxTokens: Int?
 
-    public init(baseURL: String = "https://api.openai.com/v1", model: String = "") {
+    public init(baseURL: String = "https://api.openai.com/v1", model: String = "", api: String = "openai-completions", reasoningEffort: String? = nil, forceAdaptiveThinking: Bool? = nil, maxTokens: Int? = nil) {
         self.baseURL = baseURL
         self.model = model
+        self.api = api
+        self.reasoningEffort = reasoningEffort
+        self.forceAdaptiveThinking = forceAdaptiveThinking
+        self.maxTokens = maxTokens
+    }
+
+    private enum CodingKeys: String, CodingKey { case baseURL, model, api, reasoningEffort, forceAdaptiveThinking, maxTokens }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        baseURL = try c.decode(String.self, forKey: .baseURL)
+        model = try c.decode(String.self, forKey: .model)
+        api = try c.decodeIfPresent(String.self, forKey: .api) ?? "openai-completions"
+        reasoningEffort = try c.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        forceAdaptiveThinking = try c.decodeIfPresent(Bool.self, forKey: .forceAdaptiveThinking)
+        maxTokens = try c.decodeIfPresent(Int.self, forKey: .maxTokens)
     }
 }

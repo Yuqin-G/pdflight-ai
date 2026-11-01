@@ -1,0 +1,16 @@
+{
+  "name": "@local/pdflight-harness-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Embed the existing Harness PDF-reading conversation in PDFlight.",
+  "exports": { ".": "./index.js", "./client": "./client.js" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-layout"]
+    }
+  }
+}

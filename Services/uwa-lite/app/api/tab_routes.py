@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 import time
 import asyncio
 import queue
@@ -22,7 +23,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request, HTTPException, Depends, Header, Query
 from fastapi.params import Param
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.core.config import _request_context, atomic_write_json, get_logger, SSEFormatter
 from app.core import get_browser
@@ -49,6 +50,7 @@ from app.services.arena_direct_models import (
 )
 from app.services.conversation_bindings import (
     conversation_binding_store,
+    conversation_metadata,
     is_conversation_url,
     normalize_conversation_key,
     normalize_conversation_title,
@@ -1543,7 +1545,7 @@ class ChatRequest(BaseModel):
     function_call: Optional[Any] = Field(default=None)
     preset_name: Optional[str] = Field(default=None)
     stream_options: Optional[dict] = Field(default=None)
-    conversation_key: Optional[str] = Field(default=None, max_length=200)
+    conversation_key: Optional[str] = Field(default=None, max_length=200, validation_alias=AliasChoices("conversation_key", "client_session_id", "clientSessionId", "session_id"))
     conversation_title: Optional[str] = Field(default=None, max_length=120)
     reuse_current_conversation: Optional[bool] = Field(default=False)
     pdf_attachments: Optional[list] = Field(default=None)
@@ -2377,6 +2379,25 @@ async def _chat_with_route_domain(
     return response
 
 
+@router.get("/v1/conversations")
+async def get_conversation_binding(
+    client_session_id: Optional[str] = Query(default=None),
+    conversation_key: Optional[str] = Query(default=None),
+    authenticated: bool = Depends(verify_service_auth),
+):
+    """Look up a native session binding without opening or changing a browser tab."""
+    try:
+        key = normalize_conversation_key(client_session_id or conversation_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not key:
+        raise HTTPException(status_code=422, detail="client_session_id or conversation_key is required")
+    binding = await asyncio.to_thread(conversation_binding_store.get, key)
+    if binding is None:
+        raise HTTPException(status_code=404, detail="conversation_not_bound")
+    return conversation_metadata(key, binding.conversation_url, "bound")
+
+
 async def _chat_with_conversation_binding(
     request: Request,
     body: ChatRequest,
@@ -2488,6 +2509,15 @@ async def _chat_with_conversation_binding(
                     detail="bound_conversation_url_restore_failed",
                     headers={"Retry-After": "2"},
                 )
+        else:
+            # A fresh paper session must not submit into an unrelated Qwen chat,
+            # even if the tab pool handed us a stale or recycled page.
+            fresh_url = f"https://{normalize_route_domain(route_domain)}/"
+            fresh = await asyncio.to_thread(
+                _restore_bound_conversation_tab_url, browser, tab_index, fresh_url, tab_info
+            )
+            if not fresh.get("ok"):
+                raise HTTPException(status_code=503, detail="new_conversation_page_not_ready")
 
         updated_body = body.model_copy(
             update={
@@ -2536,6 +2566,28 @@ async def _chat_with_conversation_binding(
                 resolved_headers=resolved_headers,
             )
 
+        metadata = conversation_metadata(conversation_key, plan.conversation_url, state)
+
+        async def capture_binding() -> None:
+            current_url = await asyncio.to_thread(_get_live_tab_url_by_index, browser, tab_index)
+            if plan.conversation_url and not tab_url_matches(plan.conversation_url, current_url):
+                return
+            if is_conversation_url(route_domain, current_url):
+                try:
+                    binding = await asyncio.to_thread(
+                        conversation_binding_store.bind, key=conversation_key,
+                        route_domain=normalize_route_domain(route_domain), conversation_url=current_url,
+                    )
+                except sqlite3.IntegrityError:
+                    # A newly opened page can briefly expose another thread's URL.
+                    # Do not steal that binding or terminate the answer stream; retry
+                    # at its terminal event when Qwen has settled on the new URL.
+                    if plan.conversation_url:
+                        raise
+                    logger.warning("新会话页面暂时显示已绑定的旧地址，继续等待正确的对话地址")
+                    return
+                metadata.update(conversation_metadata(conversation_key, binding.conversation_url, state))
+
         finalized = False
 
         async def finalize_binding() -> None:
@@ -2544,6 +2596,7 @@ async def _chat_with_conversation_binding(
                 return
             finalized = True
             try:
+                await capture_binding()
                 current_url = await asyncio.to_thread(
                     _get_live_tab_url_by_index,
                     browser,
@@ -2558,7 +2611,7 @@ async def _chat_with_conversation_binding(
                         f"key={conversation_key}, expected={plan.conversation_url}, "
                         f"actual={current_url or '-'}"
                     )
-                elif is_conversation_url(route_domain, current_url):
+                elif is_conversation_url(route_domain, current_url) and metadata.get("conversation_url") and tab_url_matches(metadata["conversation_url"], current_url):
                     await asyncio.to_thread(
                         conversation_binding_store.bind,
                         key=conversation_key,
@@ -2607,8 +2660,32 @@ async def _chat_with_conversation_binding(
 
             async def bound_iterator():
                 try:
+                    first = True
                     async for chunk in original_iterator:
-                        yield chunk
+                        text = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+                        payloads = list(iter_openai_sse_payloads(text))
+                        terminal = any(
+                            isinstance(payload, dict) and any(
+                                choice.get("finish_reason") is not None
+                                for choice in payload.get("choices", []) if isinstance(choice, dict)
+                            ) for payload in payloads
+                        ) or sse_chunk_has_done(text)
+                        if first or terminal:
+                            await capture_binding()
+                            first = False
+                        lines = []
+                        for line in text.splitlines(keepends=True):
+                            if line.startswith("data:"):
+                                try:
+                                    data = json.loads(line[5:].strip())
+                                except (ValueError, TypeError):
+                                    pass
+                                else:
+                                    if isinstance(data, dict):
+                                        data.update(metadata)
+                                        line = "data: " + json.dumps(data, ensure_ascii=False) + "\n"
+                            lines.append(line)
+                        yield "".join(lines)
                 finally:
                     finalize_task = asyncio.create_task(finalize_binding())
                     _conversation_binding_finalize_tasks.add(finalize_task)
@@ -2621,6 +2698,15 @@ async def _chat_with_conversation_binding(
             return response
 
         await finalize_binding()
+        if isinstance(response, JSONResponse):
+            payload = json.loads(response.body)
+            if isinstance(payload, dict):
+                payload.update(metadata)
+                response.body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                response.headers["content-length"] = str(len(response.body))
+        if metadata.get("conversation_url"):
+            response.headers["X-UWA-Conversation-URL"] = metadata["conversation_url"]
+            response.headers["X-UWA-Conversation-ID"] = metadata["conversation_id"]
         return response
     except Exception:
         if release_owned:

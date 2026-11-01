@@ -42,3 +42,57 @@ PDFlight 在 AI Base URL 指向 loopback 且端口无响应时会自动拉起本
 注意:chat.qwen.ai 需要登录态才能稳定开新会话。游客态新开标签页会被重定向到
 `/auth`(无输入框,工作流失败);已有 `/c/guest` 标签页可复用但绑定退化为共享。
 建议在受控 Chrome 里登录一次 Qwen。
+
+
+## Native session continuity (Qwen)
+
+`app/` is the imported service source. The optional sibling `api/`, `core/`, and
+`services/` trees are old copies and are not imported by `main.py`.
+
+Send the stable client session ID as `conversation_key` on
+`POST http://127.0.0.1:8199/v1/chat/completions` with advertised model `qwen`.
+`client_session_id`, `clientSessionId`, and `session_id` are equivalent request
+aliases. A request without a key keeps its existing independent-request behavior.
+The first keyed request opens a dedicated Qwen tab. Later requests with the same
+key restore its SQLite-bound website URL and submit only the newest user message.
+They do not replay the PDF or conversation transcript. For SDK runtimes that add
+technical user-role context after the entered request, mark that context with the
+standard OpenAI message field `name: "dsh_context"`; it is excluded from continuation
+selection. Entered messages may use `name: "dsh_user"`. Unnamed clients keep their
+normal behavior.
+
+Completion JSON and SSE JSON chunks add these top-level fields (outside content):
+
+```json
+{
+  "conversation_key": "native-session-id",
+  "client_session_id": "native-session-id",
+  "conversation_id": "actual-qwen-conversation-id",
+  "conversation_url": "https://chat.qwen.ai/c/actual-qwen-conversation-id",
+  "conversation_state": "continued"
+}
+```
+
+The first SSE chunk may have null website ID/URL and state `pending` until Qwen
+creates its chat. Terminal chunks include the persisted website URL when available.
+States are `pending`, `created`, `continued`; lookup reports `bound`. Nonstream
+responses also set `X-UWA-Conversation-URL` and `X-UWA-Conversation-ID` when bound.
+The request session ID and website conversation ID are distinct identities.
+
+`GET /v1/conversations?client_session_id=native-session-id` (or
+`?conversation_key=native-session-id`) retrieves the same binding metadata without
+opening a tab. It returns HTTP 404 with detail `conversation_not_bound` until a
+durable URL exists, and HTTP 422 for invalid or absent keys. This service uses its
+existing authentication settings for both completions and lookup.
+
+Stored and emitted URLs exclude credentials, query strings, and fragments. Guest
+threads are not durable bindings. Failed or cancelled browser requests should not
+be automatically retried: submission may already have happened on the website.
+The Qwen workflow clicks its visible send button, since Enter did not submit on
+the tested current Qwen page.
+
+Regression checks (no browser, no credentials, temporary SQLite only):
+
+```sh
+.venv/bin/python -m unittest discover -s tests -p 'test_conversation_contract.py'
+```

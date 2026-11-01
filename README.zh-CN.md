@@ -8,14 +8,7 @@
   <a href="README.md">English</a> · <strong>简体中文</strong>
 </p>
 
-PDFlight AI 是一款极轻量的原生 macOS AI 论文阅读器，内置完整的 **Ask PDF** 工作区。它将 AppKit 界面、仅启用 PDF 的 MuPDF 引擎、按论文隔离的 AI 对话、可编辑 Prompt 模式和原生 Markdown/LaTeX 渲染结合起来，同时不使用 WebView、embedding 或 RAG。
-
-**Extremely Light**
-
-| 打开的 PDF 数量 | PDFlight | Skim |
-| ---: | ---: | ---: |
-| 10 | 165.2 MiB | 934.6 MiB |
-| 30 | 338.2 MiB | 2,595.6 MiB |
+PDFlight AI 是一款 macOS PDF 阅读器，使用 AppKit 和 MuPDF 显示文献。右侧 **Ask PDF** 直接嵌入本机 DeepSeek Harness 的 PDF 阅读对话，使用 Harness 原有的主题、会话、模型和阅读提示词。
 
 当前功能：
 
@@ -36,22 +29,16 @@ PDFlight AI 是一款极轻量的原生 macOS AI 论文阅读器，内置完整�
 - 将文字对齐高亮写回为标准 PDF 批注；
 - 内嵌 PDF 文字备注批注；
 - Command-Z 撤销最近一次高亮或文字备注；
-- 默认打开的原生 **Ask PDF** AI 侧栏，后台流式接收并在完成后一次性显示，所有论文共享并记住同一宽度与显示状态，支持按论文显示横向会话标签、单独调节并选择回复文字、编辑或新增 Prompt 模式、原生块级 Markdown/LaTeX 渲染与逐条复制/删除；
+- 直接嵌入 DeepSeek Harness PDF 阅读对话的 **Ask PDF** 侧栏，包含原有会话标签、模型、提示词、附件和主题；
 - 直接保存，并在关闭存在未保存修改的文档时提示。
 
 ## Ask PDF
 
-AI 侧栏默认打开，可以拖动分隔线调整宽度。它的宽度和显示状态会同步到所有已打开论文，并与阅读器窗口尺寸一起在下次启动时恢复。回复区手势缩放默认关闭；在 AI 设置中开启后，可在回复列表上双指捏合，或使用 **Command + 滚轮**，只调整回复正文，不改变输入框和控件字号。设置面板也可直接在 Finder 打开可迁移的聊天记录目录。会话标签后的 **+** 可为当前论文新建会话。按 **Shift-Command-A** 隐藏或重新显示，再点击齿轮填写 OpenAI-compatible Base URL、模型和可选 API key。支持 OpenAI、OpenRouter、DeepSeek、Ollama、LM Studio 这类 chat-completions 接口。
+侧栏嵌入正在运行的 DeepSeek Harness Desktop 的 PDF 阅读对话。请先在 Harness 中启用 `@local/pdf-reading-mode` 插件；如果尚未安装连接插件，可以在侧栏点击 **安装连接插件**，也可以运行 `node scripts/install-harness-bridge.mjs`。连接插件加入现有桌面配置，复用同一个 Harness 会话存储。
 
-PDFlight 会在后台持续接收流式响应，并实时显示模型活动状态；等生成结束后，再一次性插入并渲染完整的 Markdown/LaTeX 回答，避免未完成的表格和公式反复重排。如果手动停止或连接失败，已经收到的正文仍会保留为部分回复。
+首次打开论文时，PDFlight 会根据 PDF 内容匹配 Harness 文献库，找不到时导入一份副本。源文件路径与论文的对应关系会保留，因此保存 PDF 批注后仍使用原来的对话。模型、会话、渲染、阅读提示词和主题由 Harness 管理；侧栏宽度和显示状态仍由 PDFlight 在窗口之间同步。按 **Shift-Command-A** 可隐藏或显示侧栏。
 
-每个新会话都默认选中 **No prompt**。Prompt 模式以输入框下方的按钮显示，点击 **Reading** 即可启用中文深度阅读模板；旁边的菜单可以编辑 No prompt、Reading，或新增自定义模式。模板以便于迁移的 JSON 保存，并支持用 `{{title}}` 插入当前 PDF 标题。任何模式都不会自动附加 PDF 页面内容。
-
-当前论文的不同会话以稳定的横向标签显示。标题栏中的缩小/放大按钮只调整并记住回复字号，不会改变输入框。回复采用与 Argus 相同的 macOS 系统字体栈：正文使用 SF Pro（中文自动回退为苹方），代码使用 SF Mono。按回车发送后会保持当前标签，并让最新消息继续可见。
-
-每个 PDF 标签页都有独立的聊天区域，并可创建多个会话。历史按钮会按论文分组显示全部会话，也可以直接在 Finder 中打开存储目录。记录以“每篇论文一个文件”的版本化、格式化 UTF-8 JSON 保存在 `~/Library/Application Support/dev.pdflight.reader/ai-chats`，无需数据库，复制整个目录即可备份或迁移。AI 回复原生渲染标题、列表、引用、表格、代码块、粗体/斜体 Markdown 和 LaTeX 公式，并支持 `\text{…}` 中的中文标签；强调标记可以跨越行内公式，行内公式会嵌在原段落中连续排版，超宽块级公式可以横向滚动。回复文字可以直接选择；用户和助手的消息卡顶部、底部都有复制入口，底部删除操作经确认后会同步更新本地记录。
-
-AI 功能刻意保持轻量：不建立 embedding、不运行 RAG、不开放 MCP 工具、不自动截取或上传 PDF 页面，也不使用 WebView。只有用户明确粘贴、拖入或添加的图片才会发送。API key 保存在 macOS 钥匙串中。
+打开论文时，连接插件会把可转换的 PDFlight 旧文本对话导入 Harness 原生会话。含图片附件或格式不受支持的记录保留在 `~/Library/Application Support/dev.pdflight.reader/ai-chats`，侧栏会提示；原始文件不会删除。嵌入面板使用 WebKit 并连接正在运行的 Harness，因此内存占用与旧版原生侧栏不同。
 
 ## 文献库
 

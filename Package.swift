@@ -20,13 +20,14 @@ let package = Package(
         .executable(name: "PDFlightMuPDFChecks", targets: ["PDFlightMuPDFChecks"])
     ],
     dependencies: [
-        .package(url: "https://github.com/kostub/iosMath.git", from: "2.1.0")
+        .package(url: "https://github.com/kostub/iosMath.git", from: "2.1.0"),
+        .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2")
     ],
     targets: [
         .target(name: "PDFlightCore"),
         .target(
             name: "PDFlightAI",
-            dependencies: ["PDFlightCore"],
+            dependencies: ["PDFlightCore", .product(name: "Yams", package: "Yams")],
             linkerSettings: [
                 .linkedFramework("Security")
             ]
@@ -88,7 +89,8 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("CoreGraphics")
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("WebKit")
             ]
         )
     ]

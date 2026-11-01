@@ -334,6 +334,7 @@ class GeneratingStatusCache:
             self._found_selector = None
 
         indicator_selectors = [
+            'css:button[aria-label*="停止"]',
             'css:button[aria-label*="Stop"]',
             'css:button[aria-label*="stop"]',
             'css:[data-state="streaming"]',
@@ -1971,6 +1972,9 @@ class StreamMonitor:
             elif hold_unrendered_image:
                 # Do not let a URL/reference-only change satisfy the normal
                 # completion rules while the page still has no rendered image.
+                pass
+            elif self._stream_config.get("respect_generating_indicator") and still_generating:
+                # Stable text can be a pause in thinking, not a finished answer.
                 pass
             elif ctx.content_ever_changed:
                 if (not suppress_fast_exit and ctx.stable_text_count >= stable_count_threshold and

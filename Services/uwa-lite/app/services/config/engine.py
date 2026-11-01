@@ -2822,6 +2822,8 @@ class ConfigEngine:
         for key in ["mode", "hard_timeout"]:
             if key in stream_config:
                 result[key] = stream_config[key]
+        if "respect_generating_indicator" in stream_config:
+            result["respect_generating_indicator"] = _coerce_bool(stream_config["respect_generating_indicator"], False)
 
         if isinstance(stream_config.get("request_transport"), dict):
             result["request_transport"] = normalize_request_transport_config(
@@ -2963,9 +2965,12 @@ class ConfigEngine:
                 try:
                     val = float(config[key])
                     if key == "hard_timeout":
-                        result[key] = max(10, min(val, 600))
+                        result[key] = max(10, min(val, 1800))
                 except (ValueError, TypeError):
                     pass
+
+        if "respect_generating_indicator" in config:
+            result["respect_generating_indicator"] = _coerce_bool(config["respect_generating_indicator"], False)
 
         # 验证 send_confirmation 配置
         if isinstance(config.get("send_confirmation"), dict):

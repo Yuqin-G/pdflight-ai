@@ -9,6 +9,7 @@ public enum OpenAIStreamProgress: Sendable, Equatable {
 public struct OpenAIStreamAccumulator: Sendable {
     public private(set) var content = ""
     public private(set) var reasoningCharacters = 0
+    public private(set) var reasoning = ""
 
     public init() {}
 
@@ -16,6 +17,7 @@ public struct OpenAIStreamAccumulator: Sendable {
         switch event {
         case .reasoningDelta(let reasoning):
             reasoningCharacters += reasoning.count
+            self.reasoning += reasoning
             return .thinking(reasoningCharacters: reasoningCharacters)
         case .contentDelta(let delta):
             content += delta

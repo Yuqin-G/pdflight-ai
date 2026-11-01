@@ -557,6 +557,7 @@ class StreamConfig(TypedDict, total=False):
     mode: Literal["dom", "network"]
     request_transport: Dict[str, Any]
     hard_timeout: float
+    respect_generating_indicator: bool
     network: NetworkConfig
     send_confirmation: SendConfirmationConfig
     attachment_monitor: AttachmentMonitorConfig

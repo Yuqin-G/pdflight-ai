@@ -26,7 +26,8 @@ public enum OpenAICompatibleError: Error, LocalizedError, Sendable, Equatable {
 }
 
 public struct OpenAIStreamDecoder: Sendable {
-    public init() {}
+    private let api: String
+    public init(api: String = "openai-completions") { self.api = api }
 
     public mutating func decode(line: String) throws -> OpenAIStreamEvent? {
         guard line.hasPrefix("data:") else { return nil }
@@ -36,6 +37,23 @@ public struct OpenAIStreamDecoder: Sendable {
 
         guard let data = payload.data(using: .utf8) else {
             throw OpenAICompatibleError.invalidResponse
+        }
+        if api != "openai-completions" {
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = object["type"] as? String else { throw OpenAICompatibleError.invalidResponse }
+            if type == "response.output_text.delta", let delta = object["delta"] as? String { return .contentDelta(delta) }
+            if type == "response.reasoning_summary_text.delta", let delta = object["delta"] as? String { return .reasoningDelta(delta) }
+            if type == "response.completed" || type == "message_stop" { return .finished }
+            if type == "content_block_delta", let delta = object["delta"] as? [String: Any] {
+                if delta["type"] as? String == "text_delta", let text = delta["text"] as? String { return .contentDelta(text) }
+                if delta["type"] as? String == "thinking_delta", let text = delta["thinking"] as? String { return .reasoningDelta(text) }
+            }
+            if type == "error" || type == "response.failed" {
+                let response = object["response"] as? [String: Any]
+                let error = (object["error"] as? [String: Any]) ?? (response?["error"] as? [String: Any])
+                throw OpenAICompatibleError.service(error?["message"] as? String ?? "The model request failed.")
+            }
+            return nil
         }
         let response: StreamResponse
         do {

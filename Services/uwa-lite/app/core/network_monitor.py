@@ -139,6 +139,10 @@ class NetworkMonitor:
         
         # 从配置中加载参数
         self._stream_config = stream_config or {}
+        self._generating_checker = None
+        if self._stream_config.get("respect_generating_indicator"):
+            from app.core.stream_monitor import GeneratingStatusCache
+            self._generating_checker = GeneratingStatusCache(tab)
         self._image_config = image_config or {}
         network_config = self._stream_config.get("network", {})
         top_level_hard_timeout = self._stream_config.get(
@@ -160,7 +164,7 @@ class NetworkMonitor:
         )
         self._first_response_timeout = network_config.get(
             "first_response_timeout",
-            self._hard_timeout
+            min(float(self._hard_timeout), 120.0) if self._generating_checker else self._hard_timeout
         )
         self._response_interval = network_config.get(
             "response_interval",
@@ -1966,6 +1970,9 @@ class NetworkMonitor:
                     raise NetworkMonitorTimeout(hard_timeout_message)
 
                 if not has_seen_stream_target:
+                    if self._generating_checker and self._generating_checker.is_generating():
+                        logger.info("[NetworkMonitor] 页面仍在生成，继续等待首个网络响应")
+                        continue
                     logger.warning(f"[NetworkMonitor] 目标流响应超时 ({elapsed:.1f}s)，触发回退")
                     raise NetworkMonitorTimeout(f"目标流响应超时（{elapsed:.1f}s）")
 
@@ -2280,6 +2287,10 @@ class NetworkMonitor:
                     )
 
                 if silence_duration > effective_silence_threshold:
+                    if self._generating_checker and self._generating_checker.is_generating():
+                        logger.info("[NetworkMonitor] 页面仍在生成，延长网络静默等待")
+                        last_activity_time = time.time()
+                        continue
                     if waiting_for_followup_stream:
                         logger.warning(
                             "[NetworkMonitor] 等待后续流超时，回退到 DOM 监听 "

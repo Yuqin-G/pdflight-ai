@@ -74,9 +74,9 @@
       "主预设": {
         "selectors": {
           "input_box": "textarea[formcontrolname=\"promptText\"]",
-          "send_btn": "button[aria-label=\"Run\"]",
+          "send_btn": "ms-run-button button, button[aria-label=\"Run\"]",
           "result_container": ".chat-turn-container.model ms-prompt-chunk:not(:has(ms-thought-chunk)) ms-cmark-node.cmark-node",
-          "new_chat_btn": "a.playground-link[href=\"/u/0/prompts/new_chat\"]",
+          "new_chat_btn": "a.playground-link[href=\"/prompts/new_chat\"], a.playground-link[href=\"/u/0/prompts/new_chat\"]",
           "confirm_btn": "button.ms-button-primary[type=\"button\"]"
         },
         "stream_config": {
@@ -5016,9 +5016,9 @@
             "value": null
           },
           {
-            "action": "KEY_PRESS",
-            "target": "Enter",
-            "optional": true,
+            "action": "CLICK",
+            "target": "send_btn",
+            "optional": false,
             "value": null
           },
           {
@@ -5037,7 +5037,7 @@
         "stealth": false,
         "stream_config": {
           "mode": "network",
-          "hard_timeout": 300,
+          "hard_timeout": 1800,
           "network": {
             "listen_pattern": "api/v2/chat/completions",
             "stream_match_mode": "keyword",
@@ -5045,7 +5045,8 @@
             "parser": "qwen",
             "silence_threshold": 30,
             "response_interval": 0.5
-          }
+          },
+          "respect_generating_indicator": true
         },
         "image_extraction": {
           "enabled": false,
@@ -5270,9 +5271,9 @@
             "value": null
           },
           {
-            "action": "KEY_PRESS",
-            "target": "Enter",
-            "optional": true,
+            "action": "CLICK",
+            "target": "send_btn",
+            "optional": false,
             "value": null
           },
           {
@@ -5291,7 +5292,7 @@
         "stealth": false,
         "stream_config": {
           "mode": "network",
-          "hard_timeout": 300,
+          "hard_timeout": 1800,
           "network": {
             "listen_pattern": "api/v2/chat/completions",
             "stream_match_mode": "keyword",
@@ -5299,7 +5300,8 @@
             "parser": "qwen",
             "silence_threshold": 30,
             "response_interval": 0.5
-          }
+          },
+          "respect_generating_indicator": true
         },
         "image_extraction": {
           "enabled": false,
@@ -5517,8 +5519,8 @@
             "value": null
           },
           {
-            "action": "KEY_PRESS",
-            "target": "Enter",
+            "action": "CLICK",
+            "target": "send_btn",
             "optional": false,
             "value": null
           },
@@ -5538,7 +5540,7 @@
         "stealth": false,
         "stream_config": {
           "mode": "network",
-          "hard_timeout": 300,
+          "hard_timeout": 1800,
           "network": {
             "listen_pattern": "api/v2/chat/completions",
             "stream_match_mode": "keyword",
@@ -5546,7 +5548,8 @@
             "parser": "qwen",
             "silence_threshold": 30,
             "response_interval": 0.5
-          }
+          },
+          "respect_generating_indicator": true
         },
         "image_extraction": {
           "enabled": false,

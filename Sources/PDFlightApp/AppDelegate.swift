@@ -77,9 +77,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ).first ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support", isDirectory: true)
         let directoryName = Bundle.main.bundleIdentifier ?? "dev.pdflight.reader"
-        return applicationSupport
-            .appendingPathComponent(directoryName, isDirectory: true)
-            .appendingPathComponent("ai-chats", isDirectory: true)
+        let support = applicationSupport.appendingPathComponent(directoryName, isDirectory: true)
+        if let stage = nativeMigrationDirectory(support: support) {
+            return stage.appendingPathComponent("ai-chats", isDirectory: true)
+        }
+        return support.appendingPathComponent("native-ai-chats", isDirectory: true)
+    }
+
+    private static func nativeMigrationDirectory(support: URL) -> URL? {
+        let pointer = support.appendingPathComponent("native-migration-current.json")
+        guard let data = try? Data(contentsOf: pointer),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let path = object["directory"] as? String else { return nil }
+        let directory = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        guard directory.deletingLastPathComponent() == support.standardizedFileURL,
+              FileManager.default.fileExists(atPath: directory.appendingPathComponent("manifest.json").path) else { return nil }
+        return directory
     }
 
     private static var aiPromptTemplatesURL: URL {
@@ -132,17 +145,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let service = environment["PDFLIGHT_AI_KEYCHAIN_SERVICE"]
             .flatMap { $0.isEmpty ? nil : $0 }
-            ?? "dev.pdflight.reader.ai"
-        return AIConfigurationStore(
+            ?? "dev.pdflight.reader.native-ai"
+        let store = AIConfigurationStore(
             userDefaults: defaults,
-            secretStore: KeychainAISecretStore(service: service)
+            secretStore: KeychainAISecretStore(service: service),
+            keyPrefix: "ai.native",
+            catalogSecretsService: service
         )
+        if store.configuration().model.isEmpty, environment["PDFLIGHT_SKIP_HARNESS_MODEL_IMPORT"] != "1" {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let profile = environment["PDFLIGHT_HARNESS_PROFILE_FILE"].map { URL(fileURLWithPath: $0) }
+                ?? home.appendingPathComponent(".dsh/profiles/desktop/cordis.patch.yml")
+            let credentials = environment["PDFLIGHT_HARNESS_CREDENTIALS_FILE"].map { URL(fileURLWithPath: $0) }
+                ?? home.appendingPathComponent(".dsh/.credentials.yaml")
+            if let imported = try? HarnessModelImport.read(profile: profile, credentials: credentials) {
+                try? store.save(configuration: imported.configuration, apiKey: imported.apiKey)
+            }
+        }
+        if environment["PDFLIGHT_SKIP_HARNESS_MODEL_IMPORT"] != "1" {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let profile = environment["PDFLIGHT_HARNESS_PROFILE_FILE"].map { URL(fileURLWithPath: $0) }
+                ?? home.appendingPathComponent(".dsh/profiles/desktop/cordis.patch.yml")
+            let credentials = environment["PDFLIGHT_HARNESS_CREDENTIALS_FILE"].map { URL(fileURLWithPath: $0) }
+                ?? home.appendingPathComponent(".dsh/.credentials.yaml")
+            if let catalog = try? HarnessModelImport.readCatalog(profile: profile, credentials: credentials) {
+                try? store.importCatalogIfNeeded(catalog)
+            }
+        }
+        return store
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         IOSMathResourceLocator.install()
+        importHarnessChatZoomIfNeeded()
         installMainMenu()
         refreshRecentDocuments()
+        registerMigratedPapers()
 
         let arguments = CommandLine.arguments.dropFirst().map(URL.init(fileURLWithPath:))
         let PDFs = arguments.filter { $0.pathExtension.lowercased() == "pdf" }
@@ -158,6 +196,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             PDFs.forEach(open)
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func importHarnessChatZoomIfNeeded() {
+        let key = "reader.nativePaperChatZoom"
+        guard UserDefaults.standard.object(forKey: key) == nil else { return }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let directory = ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_DRAFT_DIRECTORY"].map { URL(fileURLWithPath: $0) }
+            ?? home.appendingPathComponent("Library/Application Support/dev.pdflight.reader/harness-draft-import")
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        let zooms = Set(files.filter { $0.pathExtension == "json" }.compactMap { file -> Double? in
+            guard let data = try? Data(contentsOf: file),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let zoom = object["chatZoom"] as? Double, zoom.isFinite, (0.8...2.4).contains(zoom) else { return nil }
+            return zoom
+        })
+        if let zoom = zooms.first, zooms.count == 1 { UserDefaults.standard.set(zoom, forKey: key) }
+    }
+
+    private func registerMigratedPapers() {
+        guard ProcessInfo.processInfo.environment["PDFLIGHT_PAPER_LIBRARY_FILE"] == nil else { return }
+        let bundleID = Bundle.main.bundleIdentifier ?? "dev.pdflight.reader"
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).count <= 1 else { return }
+        let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/\(bundleID)")
+        guard let directory = Self.nativeMigrationDirectory(support: support),
+              let data = try? Data(contentsOf: directory.appendingPathComponent("manifest.json")),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let targets = object["targets"] as? [[String: Any]] else { return }
+        let copies = targets.compactMap { target -> URL? in
+            guard target["copied"] as? Bool == true, let path = target["path"] as? String else { return nil }
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            guard url.path.hasPrefix(directory.appendingPathComponent("papers").path + "/") else { return nil }
+            return url
+        }
+        Task { [paperLibraryStore] in
+            for url in copies where FileManager.default.fileExists(atPath: url.path) {
+                _ = try? await paperLibraryStore.addPaper(at: url, to: nil)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -516,7 +592,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applicationMenu.addItem(withTitle: "About PDFlight", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         applicationMenu.addItem(.separator())
         let aiSettings = applicationMenu.addItem(
-            withTitle: "AI Settings…",
+            withTitle: "Open DeepSeek Harness…",
             action: #selector(configureAI(_:)),
             keyEquivalent: ","
         )

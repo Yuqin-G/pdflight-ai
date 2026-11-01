@@ -277,7 +277,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private let selectionActionBar = PDFSelectionActionBar(frame: .zero)
     private let contentSplitView = NSSplitView()
     private let navigationSidebar: ReaderNavigationSidebarView
-    private let aiSidebar = AIChatSidebarView()
+    private lazy var aiSidebar = NativePaperChatSidebar()
     private let pageLabel = NSTextField(labelWithString: "—")
     private let zoomLabel = NSTextField(labelWithString: "100%")
     private let searchField = NSSearchField()
@@ -404,12 +404,6 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             name: .readerWorkspaceLayoutDidChange,
             object: nil
         )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(aiReplyGestureZoomPreferenceChanged(_:)),
-            name: .aiReplyGestureZoomPreferenceDidChange,
-            object: nil
-        )
         configureContent()
         loadAIPromptTemplates()
         loadAIHistory()
@@ -494,7 +488,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         setAIVisible(aiSidebar.isHidden)
         if !aiSidebar.isHidden {
             if let selectedText = selectedPDFText() {
-                aiSidebar.prefill("Explain the following selected text:\n\n\(selectedText)")
+                aiSidebar.insertQuote("[\(PaperLibraryPaper.automaticDisplayAlias(for: paperTitle)) · p. \(currentPage + 1)]\n\(selectedText)\n\n")
             }
             aiSidebar.focusComposer()
         }
@@ -688,7 +682,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         }
         hideSelectionActionBar()
         setAIVisible(true)
-        aiSidebar.prefill("Explain the following selected text:\n\n\(selectedText)")
+        let selectedPage = (activeSelectionPageView?.page?.index ?? currentPage) + 1
+        aiSidebar.insertQuote("[\(PaperLibraryPaper.automaticDisplayAlias(for: paperTitle)) · p. \(selectedPage)]\n\(selectedText)\n\n")
         aiSidebar.focusComposer()
     }
 
@@ -765,6 +760,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     }
 
     func windowWillClose(_ notification: Notification) {
+        aiSidebar.close()
         saveReadingPosition()
         cancelPageWork()
         loadTask?.cancel()
@@ -847,6 +843,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 applyAISidebarWidth(workspaceLayoutCoordinator.aiWidth)
                 window?.contentView?.layoutSubtreeIfNeeded()
                 isApplyingAISidebarLayout = false
+            }
+            // Restoring a tabbed session briefly makes each window key. Wait
+            // until selection settles before starting the full Harness client.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, window?.isKeyWindow == true, !aiSidebar.isHidden else { return }
+                aiSidebar.activate()
             }
         }
         updateVisiblePages()
@@ -1036,52 +1038,45 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         navigationSidebar.translatesAutoresizingMaskIntoConstraints = false
         navigationSidebar.isHidden = !workspaceLayoutCoordinator.navigationVisible
         outlineButton.state = workspaceLayoutCoordinator.navigationVisible ? .on : .off
-        aiSidebar.onSend = { [weak self] question, attachments, preset, includeCurrentPDF in
-            self?.submitAIMessage(
-                question,
-                attachments: attachments,
-                preset: preset,
-                includeCurrentPDF: includeCurrentPDF
-            )
+        aiSidebar.onSend = { [weak self] question, attachments, preset, includePDF in
+            self?.submitAIMessage(question, attachments: attachments, preset: preset, includeCurrentPDF: includePDF)
         }
-        aiSidebar.onConfigure = { [weak self] in
-            self?.configureAI(nil)
+        aiSidebar.onConfigure = { [weak self] in self?.configureAI(nil) }
+        aiSidebar.onNewConversation = { [weak self] in self?.createAIConversation() }
+        aiSidebar.onSelectConversation = { [weak self] in self?.selectAIConversation($0) }
+        aiSidebar.onDeleteConversation = { [weak self] in self?.deleteAIConversation(id: $0) }
+        aiSidebar.onDeleteMessage = { [weak self] in self?.deleteAIMessage($0) }
+        aiSidebar.onRevealCurrentHistory = { [weak self] in self?.revealCurrentAIHistoryFile() }
+        aiSidebar.onPresetChange = { [weak self] in self?.updateAIConversationPreset($0) }
+        aiSidebar.onSelectModel = { [weak self] id in
+            guard let self, let index = activeAIConversationIndex else { return }
+            aiHistory?.conversations[index].modelRouteID = id
+            aiHistory?.conversations[index].reasoningEffort = nil
+            aiSidebar.setModelRoutes(aiConfigurationStore.modelRoutes(), selectedID: id, reasoningEffort: nil, customModel: aiConfigurationStore.configuration().model)
+            persistAIHistory()
         }
-        aiSidebar.onNewConversation = { [weak self] in
-            self?.createAIConversation()
+        aiSidebar.onSelectReasoning = { [weak self] effort in
+            guard let self, let index = activeAIConversationIndex else { return }
+            aiHistory?.conversations[index].reasoningEffort = effort
+            let routeID = aiHistory?.conversations[index].modelRouteID ?? aiConfigurationStore.defaultRouteID()
+            aiSidebar.setModelRoutes(aiConfigurationStore.modelRoutes(), selectedID: routeID, reasoningEffort: effort, customModel: aiConfigurationStore.configuration().model)
+            persistAIHistory()
         }
-        aiSidebar.onSelectConversation = { [weak self] conversationID in
-            self?.selectAIConversation(conversationID)
-        }
-        aiSidebar.onDeleteConversation = { [weak self] in
-            self?.deleteAIConversation()
-        }
-        aiSidebar.onDeleteMessage = { [weak self] messageID in
-            self?.deleteAIMessage(messageID)
-        }
-        aiSidebar.onRemoveQueuedSubmission = { [weak self] submissionID in
+        aiSidebar.onApplyPrompt = { [weak self] preset in
             guard let self else { return }
-            aiSubmissionQueue.remove(id: submissionID)
-            refreshQueuedAISubmissions()
+            aiSidebar.insertPrompt(NativePaperPrompts.text(for: preset.rawValue, title: paperTitle, page: currentPage + 1, selection: selectedPDFText()))
         }
-        aiSidebar.onShowHistory = { [weak self] _ in
-            self?.showAIHistoryMenu()
+        aiSidebar.onCancel = { [weak self] in self?.aiTask?.cancel() }
+        aiSidebar.onDraftChange = { [weak self] text, images, pdf in
+            guard let self, let index = activeAIConversationIndex, let id = aiHistory?.conversations[index].id else { return }
+            let draft = AIChatDraft(text: text, imageAttachments: images, includeCurrentPDF: pdf)
+            do { try aiChatHistoryStore.saveDraft(draft, sessionID: id, for: documentURL) }
+            catch { aiSidebar.setActivity(.failed, detail: "草稿保存失败：\(error.localizedDescription)") }
+            aiHistory?.conversations[index].draft = draft
+            persistAIHistory()
         }
-        aiSidebar.onRevealCurrentHistory = { [weak self] in
-            self?.revealCurrentAIHistoryFile()
-        }
-        aiSidebar.onPresetChange = { [weak self] preset in
-            self?.updateAIConversationPreset(preset)
-        }
-        aiSidebar.onEditPromptTemplate = { [weak self] preset in
-            self?.editAIPromptTemplate(preset)
-        }
-        aiSidebar.onAddPromptTemplate = { [weak self] in
-            self?.addAIPromptTemplate()
-        }
-        aiSidebar.onCancel = { [weak self] in
-            self?.aiTask?.cancel()
-        }
+        aiSidebar.setPaperTitle(paperTitle)
+        aiSidebar.setModelTitle(aiConfigurationStore.configuration().model)
         aiSidebar.onResizeBy = { [weak self] delta in
             self?.resizeAISidebar(by: delta)
         }
@@ -1089,8 +1084,6 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             self?.finishResizingAISidebar()
         }
         aiSidebar.isHidden = !workspaceLayoutCoordinator.aiVisible
-        aiSidebar.setPaperTitle(paperTitle)
-        aiSidebar.setReplyGestureZoomEnabled(AIReplyGestureZoomPreference.isEnabled())
         aiButton.state = workspaceLayoutCoordinator.aiVisible ? .on : .off
         contentSplitView.isVertical = true
         contentSplitView.dividerStyle = .thin
@@ -1468,6 +1461,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             aiSidebarWidthConstraint?.isActive = false
         }
         aiSidebar.isHidden = !visible
+        if visible, window?.isKeyWindow == true { aiSidebar.activate() }
         aiButton.state = visible ? .on : .off
         window?.contentView?.layoutSubtreeIfNeeded()
         if visible {
@@ -1566,30 +1560,37 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     }
 
     private func loadAIPromptTemplates() {
-        aiSidebar.setPromptTemplates(
-            aiPromptTemplates,
-            selectedPreset: activeAIConversationIndex
-                .flatMap { aiHistory?.conversations[$0].promptPreset }
-                ?? .defaultForNewConversation
-        )
-        Task { [weak self] in
-            guard let self else { return }
-            let templates = (try? await aiPromptTemplateStore.templates())
-                ?? AIPromptTemplate.defaults
-            aiPromptTemplates = templates
-            let selected = activeAIConversationIndex
-                .flatMap { aiHistory?.conversations[$0].promptPreset }
-                ?? .defaultForNewConversation
-            aiSidebar.setPromptTemplates(templates, selectedPreset: selected)
-        }
+        aiPromptTemplates = NativePaperPrompts.templates
+        aiSidebar.setPromptTemplates(aiPromptTemplates, selectedPreset: .reading)
     }
 
     private func loadAIHistory() {
         Task { [weak self] in
             guard let self else { return }
-            let history = (try? await aiChatHistoryStore.history(for: documentURL))
-                ?? AIPaperChatHistory.new(for: documentURL)
+            var history: AIPaperChatHistory
+            do {
+                let home = FileManager.default.homeDirectoryForCurrentUser
+                let data = ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_DATA_DIRECTORY"].map { URL(fileURLWithPath: $0) }
+                    ?? home.appendingPathComponent("Documents/deepseek-harness/default-workspace/pdf-reading-mode/data")
+                let mapping = ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_PATH_MAPPINGS"].map { URL(fileURLWithPath: $0) }
+                    ?? home.appendingPathComponent("Library/Application Support/dev.pdflight.reader/harness-bridge/paper-paths.json")
+                let drafts = ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_DRAFT_DIRECTORY"].map { URL(fileURLWithPath: $0) }
+                    ?? home.appendingPathComponent("Library/Application Support/dev.pdflight.reader/harness-draft-import")
+                let recovered = ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_RECOVERY_DIRECTORY"].map { URL(fileURLWithPath: $0) }
+                    ?? home.appendingPathComponent("Library/Application Support/dev.pdflight.reader/harness-recovery")
+                let projections = ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_PROJECTIONS"].map { URL(fileURLWithPath: $0) }
+                    ?? home.appendingPathComponent(".dsh/storages/session_projcache/sessions")
+                history = try await aiChatHistoryStore.importHarnessIfNeeded(for: documentURL, dataDirectory: data, pathMappingsURL: mapping, draftDirectory: drafts, recoveredArchivesDirectory: recovered, projectionDirectory: projections)
+            } catch {
+                aiSidebar.setActivity(.failed, detail: "导入 Harness 对话失败：\(error.localizedDescription)。原始记录仍然保留。")
+                return
+            }
             guard !Task.isCancelled else { return }
+            if history.conversations.count == 1, history.conversations[0].messages.isEmpty,
+               history.conversations[0].title == "New conversation" {
+                history.conversations[0].title = PaperLibraryPaper.automaticDisplayAlias(for: paperTitle)
+                history.conversations[0].promptPreset = .reading
+            }
             aiHistory = history
             aiHistoryLoaded = true
             let conversationID = pendingAIConversationID ?? history.activeConversationID
@@ -1651,7 +1652,21 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let preset = submission.promptPreset
         let includeCurrentPDF = submission.includeCurrentPDF
 
-        let configuration = aiConfigurationStore.configuration()
+        let routes = aiConfigurationStore.modelRoutes()
+        let routeID = activeAIConversationIndex.flatMap { aiHistory?.conversations[$0].modelRouteID }
+            ?? aiConfigurationStore.defaultRouteID()
+        let route = routes.first { $0.id == routeID }
+        if let routeID, route == nil, routeID != NativePaperChatSidebar.customRouteID {
+            aiSidebar.setActivity(.failed, detail: "原会话模型 \(routeID) 未找到，请选择一个可用模型。")
+            return
+        }
+        if let route, !route.isSupported {
+            aiSidebar.setActivity(.failed, detail: "该模型的 \(route.api) 协议暂不可用，请选择兼容的模型。")
+            return
+        }
+        let effort = activeAIConversationIndex.flatMap { aiHistory?.conversations[$0].reasoningEffort }
+        let configuration = route.map { AIProviderConfiguration(baseURL: $0.baseURL, model: $0.model, api: $0.api, reasoningEffort: effort, forceAdaptiveThinking: $0.forceAdaptiveThinking, maxTokens: $0.maxTokens) }
+            ?? aiConfigurationStore.configuration()
         guard !configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             aiSidebar.prefill(
                 question,
@@ -1668,7 +1683,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
 
         let apiKey: String
         do {
-            apiKey = try aiConfigurationStore.apiKey()
+            apiKey = try route.map { try aiConfigurationStore.apiKey(for: $0) } ?? aiConfigurationStore.apiKey()
         } catch {
             aiSidebar.prefill(
                 question,
@@ -1698,7 +1713,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let userMessage = AIChatMessage(
             role: .user,
             content: displayQuestion,
-            imageAttachments: attachments
+            imageAttachments: attachments,
+            pdfAttachmentName: includeCurrentPDF ? documentURL.lastPathComponent : nil
         )
         aiSidebar.clearComposer()
         aiMessages.append(userMessage)
@@ -1722,10 +1738,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let conversationGeneration = aiConversationGeneration
         let conversationKey: String?
         if let index = activeAIConversationIndex, let history = aiHistory {
-            conversationKey = AIConversationRouting.conversationKey(
+            let defaultKey = AIConversationRouting.conversationKey(
                 for: history.conversations[index].id,
                 configuration: configuration
             )
+            conversationKey = defaultKey == nil ? nil : (history.conversations[index].webConversationKey ?? defaultKey)
         } else {
             conversationKey = nil
         }
@@ -1735,6 +1752,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             var accumulator = OpenAIStreamAccumulator()
             var reportedThinking = false
             var reportedAnswering = false
+            var lastRenderedAt: TimeInterval = 0
+            var lastReasoningRenderedAt: TimeInterval = 0
             defer {
                 if activeAIPlaceholderID == placeholder.id {
                     activeAIPlaceholderID = nil
@@ -1745,7 +1764,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             }
             do {
                 let requestMessages = AIChatRequestBuilder.messages(
-                    instruction: promptTemplate.instruction(title: paperTitle),
+                    instruction: "你是论文阅读助手。依据提供的论文与选文回答；默认使用中文，关键结论注明页码。区分原文与推断，缺少证据时直说，不编造。",
                     paperContext: nil,
                     conversation: recentAIConversation()
                 )
@@ -1775,9 +1794,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     conversationTitle: conversationTitle,
                     currentPDFURL: includeCurrentPDF ? documentURL : nil
                 )
-                if !includeCurrentPDF {
-                    aiSidebar.setActivity(.waiting, detail: configuration.model)
-                }
+                aiSidebar.setActivity(includeCurrentPDF ? .uploading : .waiting, detail: configuration.model)
                 aiSidebar.setMessageActivity(
                     id: placeholder.id,
                     phase: .waiting,
@@ -1808,8 +1825,17 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     case .thinking, .answering, .finished:
                         break
                     }
+                    if case .contentDelta = event, ProcessInfo.processInfo.systemUptime - lastRenderedAt >= 0.08 {
+                        aiSidebar.updateMessage(id: placeholder.id, content: accumulator.content, renderMarkdown: true)
+                        lastRenderedAt = ProcessInfo.processInfo.systemUptime
+                    }
+                    if case .reasoningDelta = event, ProcessInfo.processInfo.systemUptime - lastReasoningRenderedAt >= 0.08 {
+                        aiSidebar.updateReasoning(id: placeholder.id, content: accumulator.reasoning)
+                        lastReasoningRenderedAt = ProcessInfo.processInfo.systemUptime
+                    }
                 }
                 let finalContent = try accumulator.finalAnswer()
+                aiSidebar.updateReasoning(id: placeholder.id, content: accumulator.reasoning)
                 guard conversationGeneration == aiConversationGeneration else {
                     throw CancellationError()
                 }
@@ -1817,7 +1843,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 let assistantMessage = AIChatMessage(
                     id: placeholder.id,
                     role: .assistant,
-                    content: finalContent
+                    content: finalContent,
+                    reasoning: accumulator.reasoning.isEmpty ? nil : accumulator.reasoning
                 )
                 aiMessages.append(assistantMessage)
                 aiSidebar.updateMessage(
@@ -1838,13 +1865,14 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             } catch is CancellationError {
                 guard conversationGeneration == aiConversationGeneration else { return }
                 let partialContent = accumulator.content
-                if partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && accumulator.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     aiSidebar.removeMessage(id: placeholder.id)
                 } else {
                     let assistantMessage = AIChatMessage(
                         id: placeholder.id,
                         role: .assistant,
-                        content: partialContent
+                        content: partialContent,
+                        reasoning: accumulator.reasoning.isEmpty ? nil : accumulator.reasoning
                     )
                     aiMessages.append(assistantMessage)
                     aiSidebar.updateMessage(
@@ -1862,7 +1890,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 )
             } catch {
                 let partialContent = accumulator.content
-                if partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && accumulator.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     aiSidebar.updateMessage(
                         id: placeholder.id,
                         content: "Request failed: \(error.localizedDescription)"
@@ -1871,7 +1899,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     let assistantMessage = AIChatMessage(
                         id: placeholder.id,
                         role: .assistant,
-                        content: partialContent
+                        content: partialContent,
+                        reasoning: accumulator.reasoning.isEmpty ? nil : accumulator.reasoning
                     )
                     aiMessages.append(assistantMessage)
                     aiSidebar.updateMessage(
@@ -1897,7 +1926,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     ) -> [AIChatMessage] {
         var result: [AIChatMessage] = []
         var remaining = maximumCharacters
-        for message in aiMessages.suffix(maximumMessages).reversed() {
+        for message in aiMessages.filter({ $0.role == .user || ($0.role == .assistant && !$0.content.isEmpty) }).suffix(maximumMessages).reversed() {
             guard remaining > 0 else { break }
             if message.content.count <= remaining {
                 result.append(message)
@@ -2008,6 +2037,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             selectedPreset: history.conversations[index].promptPreset
         )
         aiSidebar.install(aiMessages)
+        let routeID = history.conversations[index].modelRouteID ?? aiConfigurationStore.defaultRouteID()
+        aiSidebar.setModelRoutes(aiConfigurationStore.modelRoutes(), selectedID: routeID, reasoningEffort: history.conversations[index].reasoningEffort, customModel: aiConfigurationStore.configuration().model)
+        aiSidebar.setWebConversationURL(history.conversations[index].webConversationURL)
+        let draft = (try? aiChatHistoryStore.readDraft(sessionID: conversationID, for: documentURL))
+            ?? history.conversations[index].draft ?? AIChatDraft()
+        aiSidebar.restoreDraft(draft.text, attachments: draft.imageAttachments, includePDF: draft.includeCurrentPDF)
         if aiMessages.isEmpty {
             let preset = history.conversations[index].promptPreset
             let template = promptTemplate(for: preset)
@@ -2034,8 +2069,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private func createAIConversation() {
         guard aiHistoryLoaded, var history = aiHistory else { return }
         let conversation = AIConversation(
-            title: "New conversation \(history.conversations.count + 1)",
-            promptPreset: .defaultForNewConversation
+            title: PaperLibraryPaper.automaticDisplayAlias(for: paperTitle),
+            promptPreset: .reading
         )
         history.conversations.append(conversation)
         history.activeConversationID = conversation.id
@@ -2196,8 +2231,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         persistAIHistory()
     }
 
-    private func deleteAIConversation() {
-        guard let index = activeAIConversationIndex, var history = aiHistory else { return }
+    private func deleteAIConversation(id: String) {
+        guard var history = aiHistory, let index = history.conversations.firstIndex(where: { $0.id == id }) else { return }
         let alert = NSAlert()
         alert.messageText = "Delete this conversation?"
         alert.informativeText = "Other conversations for this paper will remain in local history."
@@ -2205,6 +2240,14 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        let wasActive = history.activeConversationID == id
+        if !wasActive {
+            history.conversations.remove(at: index)
+            aiHistory = history
+            refreshAIConversationControls()
+            persistAIHistory()
+            return
+        }
         aiTask?.cancel()
         aiConversationGeneration += 1
         aiHistorySaveTask?.cancel()
@@ -2362,6 +2405,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         }
         do {
             try aiConfigurationStore.save(configuration: configuration, apiKey: form.apiKey)
+            if let index = activeAIConversationIndex {
+                aiHistory?.conversations[index].modelRouteID = NativePaperChatSidebar.customRouteID
+                aiHistory?.conversations[index].reasoningEffort = nil
+                persistAIHistory()
+            }
+            aiSidebar.setModelRoutes(aiConfigurationStore.modelRoutes(), selectedID: NativePaperChatSidebar.customRouteID, customModel: configuration.model)
             AIReplyGestureZoomPreference.setEnabled(form.replyGestureZoomEnabled)
             aiSidebar.setActivity(.ready, detail: "AI provider saved; paper text is sent only when requested")
             return true

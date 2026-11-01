@@ -46,7 +46,7 @@ public enum AIChatRequestBuilder {
            !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result.append(AIChatMessage(role: .system, content: instruction))
         }
-        result.append(contentsOf: conversation)
+        result.append(contentsOf: conversation.filter { $0.role != .tool && !($0.role == .assistant && $0.content.isEmpty) })
         return result
     }
 }

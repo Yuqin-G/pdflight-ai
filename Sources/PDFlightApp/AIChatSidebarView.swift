@@ -1960,7 +1960,7 @@ private final class AIChatMessageView: NSView {
 }
 
 @MainActor
-private final class AIChatRenderedContentView: NSStackView {
+final class AIChatRenderedContentView: NSStackView {
     private var rawContent = ""
     private var rendersMarkdown = false
     private var bodyFontSize: CGFloat = 14
@@ -1990,7 +1990,7 @@ private final class AIChatRenderedContentView: NSStackView {
     }
 
     func setFontSize(_ fontSize: CGFloat) {
-        bodyFontSize = min(24, max(11, fontSize))
+        bodyFontSize = min(34, max(11, fontSize))
         render()
     }
 

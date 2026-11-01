@@ -29,6 +29,7 @@ from app.utils.file_paste import (
 )
 from app.utils.human_mouse import smooth_move_mouse
 from app.utils.platform import get_primary_modifier_key
+from .attachment_monitor import AttachmentMonitor
 
 # ================= 常量配置 =================
 
