@@ -118,6 +118,8 @@ enum PDFlightAIChecks {
         print("PASS: paper context carries page boundaries and respects its budget")
         try await secretWaitIsCancellable()
         print("PASS: waiting for a slow keychain is cancellable without blocking the UI")
+        try referencesResolveOnlySelectedContext()
+        print("PASS: explicit file and conversation references resolve within the allowed workspace")
         try openAIStreamDecoderReadsContentAndCompletion()
         print("PASS: OpenAI stream decoder reads content and completion")
         try openAIStreamDecoderSeparatesReasoningFromFinalContent()
@@ -516,6 +518,36 @@ enum PDFlightAIChecks {
         let aBody = try JSONSerialization.jsonObject(with: anthropicFile.httpBody!) as! [String: Any]
         let turns = aBody["messages"] as! [[String: Any]]; let blocks = turns.last!["content"] as! [[String: Any]]
         try check(blocks.filter { $0["type"] as? String == "document" }.count == 2, "Anthropic must carry both explicitly attached PDFs")
+    }
+
+    private static func referencesResolveOnlySelectedContext() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pdflight-reference-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("fixture evidence".utf8).write(to: root.appendingPathComponent("note.txt"))
+        try Data("%PDF-fixture".utf8).write(to: root.appendingPathComponent("paper.pdf"))
+        let file = AIChatDraftReference(source: "reference", ref: "@note.txt", offset: 0, length: 9, label: "note.txt", appearance: "file", clipboardText: "@note.txt")
+        let pdf = AIChatDraftReference(source: "reference", ref: "@paper.pdf", offset: 10, length: 10, label: "paper.pdf", appearance: "file", clipboardText: "@paper.pdf")
+        let session = AIConversation(id: "fixture-session", title: "Earlier", messages: [.init(role: .user, content: "earlier question"), .init(role: .assistant, content: "earlier answer")])
+        let encoded = try JSONEncoder().encode(session.id).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let mention = "@[Earlier](dsh-session:\(encoded))"
+        let chat = AIChatDraftReference(source: "reference", ref: mention, offset: 21, length: (mention as NSString).length, label: "Earlier", appearance: "session", clipboardText: mention)
+        let resolved = try AIChatReferenceResolver.resolve([file, pdf, chat], draftText: "@note.txt @paper.pdf " + mention, workspaceURL: root, conversations: [session], allowOutsideWorkspace: false)
+        try check(resolved.context.contains("fixture evidence") && resolved.context.contains("earlier answer") && resolved.pdfURLs == [root.appendingPathComponent("paper.pdf").resolvingSymlinksInPath().standardizedFileURL], "selected references must supply text, conversation, and PDF")
+        let outside = AIChatDraftReference(source: "reference", ref: "@../outside.txt", offset: 0, length: 15, label: "outside", appearance: "file", clipboardText: "@../outside.txt")
+        do {
+            _ = try AIChatReferenceResolver.resolve([outside], draftText: "@../outside.txt", workspaceURL: root, conversations: [], allowOutsideWorkspace: false)
+            throw CheckFailure(message: "expected outside-workspace reference to be rejected")
+        } catch is AIChatReferenceResolver.ReferenceError { }
+        do {
+            var onlyChat = chat; onlyChat.offset = 0
+            _ = try AIChatReferenceResolver.resolve([onlyChat], draftText: mention, workspaceURL: root, conversations: [], allowOutsideWorkspace: false)
+            throw CheckFailure(message: "expected missing conversation reference to be rejected")
+        } catch is AIChatReferenceResolver.ReferenceError { }
+        do {
+            _ = try AIChatReferenceResolver.resolve([file], draftText: "unrelated", workspaceURL: root, conversations: [], allowOutsideWorkspace: false)
+            throw CheckFailure(message: "expected stale reference text to be rejected")
+        } catch is AIChatReferenceResolver.ReferenceError { }
     }
 
     @MainActor private static func secretWaitIsCancellable() async throws {

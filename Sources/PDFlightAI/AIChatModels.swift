@@ -44,6 +44,7 @@ public struct AIChatSubmission: Sendable, Equatable, Identifiable {
     public var promptPreset: AIPromptPreset
     public var includeCurrentPDF: Bool
     public var additionalPDFPaths: [String]
+    public var references: [AIChatDraftReference]
     public let createdAt: Date
 
     public init(
@@ -53,6 +54,7 @@ public struct AIChatSubmission: Sendable, Equatable, Identifiable {
         promptPreset: AIPromptPreset,
         includeCurrentPDF: Bool = false,
         additionalPDFPaths: [String] = [],
+        references: [AIChatDraftReference] = [],
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -61,6 +63,7 @@ public struct AIChatSubmission: Sendable, Equatable, Identifiable {
         self.promptPreset = promptPreset
         self.includeCurrentPDF = includeCurrentPDF
         self.additionalPDFPaths = additionalPDFPaths
+        self.references = references
         self.createdAt = createdAt
     }
 }
@@ -108,6 +111,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
     public var toolCalls: [AIChatToolCall]?
     public var feedback: String?
     public var elapsedSeconds: Double?
+    public var references: [AIChatDraftReference]?
     public let createdAt: Date
 
     public init(
@@ -122,7 +126,8 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         additionalPDFNames: [String]? = nil,
         toolCalls: [AIChatToolCall]? = nil,
         feedback: String? = nil,
-        elapsedSeconds: Double? = nil
+        elapsedSeconds: Double? = nil,
+        references: [AIChatDraftReference]? = nil
     ) {
         self.id = id
         self.role = role
@@ -136,10 +141,11 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         self.toolCalls = toolCalls
         self.feedback = feedback
         self.elapsedSeconds = elapsedSeconds
+        self.references = references
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName, additionalPDFNames, toolCalls, feedback, elapsedSeconds
+        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName, additionalPDFNames, toolCalls, feedback, elapsedSeconds, references
     }
 
     public init(from decoder: Decoder) throws {
@@ -159,6 +165,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         toolCalls = try container.decodeIfPresent([AIChatToolCall].self, forKey: .toolCalls)
         feedback = try container.decodeIfPresent(String.self, forKey: .feedback)
         elapsedSeconds = try container.decodeIfPresent(Double.self, forKey: .elapsedSeconds)
+        references = try container.decodeIfPresent([AIChatDraftReference].self, forKey: .references)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -177,6 +184,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
         try container.encodeIfPresent(feedback, forKey: .feedback)
         try container.encodeIfPresent(elapsedSeconds, forKey: .elapsedSeconds)
+        try container.encodeIfPresent(references, forKey: .references)
     }
 }
 

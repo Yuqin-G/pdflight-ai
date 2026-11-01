@@ -1038,8 +1038,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         navigationSidebar.translatesAutoresizingMaskIntoConstraints = false
         navigationSidebar.isHidden = !workspaceLayoutCoordinator.navigationVisible
         outlineButton.state = workspaceLayoutCoordinator.navigationVisible ? .on : .off
-        aiSidebar.onSend = { [weak self] question, attachments, preset, includePDF, additionalPDFPaths in
-            self?.submitAIMessage(question, attachments: attachments, preset: preset, includeCurrentPDF: includePDF, additionalPDFPaths: additionalPDFPaths)
+        aiSidebar.onSend = { [weak self] question, attachments, preset, includePDF, additionalPDFPaths, references in
+            self?.submitAIMessage(question, attachments: attachments, preset: preset, includeCurrentPDF: includePDF, additionalPDFPaths: additionalPDFPaths, references: references)
         }
         aiSidebar.onConfigure = { [weak self] in self?.configureAI(nil) }
         aiSidebar.onNewConversation = { [weak self] in self?.createAIConversation() }
@@ -1087,6 +1087,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             persistAIHistory()
         }
         aiSidebar.setPaperTitle(paperTitle)
+        aiSidebar.setReferenceDirectory(documentURL.deletingLastPathComponent())
         aiSidebar.setModelTitle(aiConfigurationStore.configuration().model)
         aiSidebar.onResizeBy = { [weak self] delta in
             self?.resizeAISidebar(by: delta)
@@ -1616,14 +1617,16 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         attachments: [AIChatImageAttachment] = [],
         preset: AIPromptPreset,
         includeCurrentPDF: Bool = false,
-        additionalPDFPaths: [String] = []
+        additionalPDFPaths: [String] = [],
+        references: [AIChatDraftReference] = []
     ) {
         let submission = AIChatSubmission(
             question: question,
             imageAttachments: attachments,
             promptPreset: preset,
             includeCurrentPDF: includeCurrentPDF,
-            additionalPDFPaths: additionalPDFPaths
+            additionalPDFPaths: additionalPDFPaths,
+            references: references
         )
         guard aiTask == nil, aiHistoryLoaded else {
             aiSubmissionQueue.enqueue(submission)
@@ -1666,7 +1669,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let preset = submission.promptPreset
         let includeCurrentPDF = submission.includeCurrentPDF
         let additionalPDFPaths = submission.additionalPDFPaths
+        let references = submission.references
         let hasPDF = includeCurrentPDF || !additionalPDFPaths.isEmpty
+        let referenceConversations = aiHistory?.conversations ?? []
+        let referenceAccessMode = activeAIConversationIndex.flatMap { aiHistory?.conversations[$0].accessMode } ?? aiConfigurationStore.defaultAccessMode()
 
         let routes = aiConfigurationStore.modelRoutes()
         let routeID = activeAIConversationIndex.flatMap { aiHistory?.conversations[$0].modelRouteID }
@@ -1719,7 +1725,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             content: displayQuestion,
             imageAttachments: attachments,
             pdfAttachmentName: includeCurrentPDF ? documentURL.lastPathComponent : nil,
-            additionalPDFNames: additionalPDFPaths.map { URL(fileURLWithPath: $0).lastPathComponent }
+            additionalPDFNames: additionalPDFPaths.map { URL(fileURLWithPath: $0).lastPathComponent },
+            references: references.isEmpty ? nil : references
         )
         if clearComposer { aiSidebar.clearComposer() }
         aiMessages.append(userMessage)
@@ -1783,11 +1790,24 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             do {
                 let apiKey = try await aiConfigurationStore.apiKeyAsync(for: route)
                 try Task.checkCancellation()
-                let requestMessages = AIChatRequestBuilder.messages(
+                let documentDirectory = documentURL.deletingLastPathComponent()
+                let resolved = try await Task.detached(priority: .userInitiated) {
+                    try AIChatReferenceResolver.resolve(references, draftText: question, workspaceURL: documentDirectory,
+                        conversations: referenceConversations, allowOutsideWorkspace: referenceAccessMode == .fullAccess)
+                }.value
+                try Task.checkCancellation()
+                let referencedPDFs = resolved.pdfURLs
+                let allAdditionalPDFs = additionalPDFPaths.map { URL(fileURLWithPath: $0) } + referencedPDFs
+                let allPDFs = Set(allAdditionalPDFs.map(\.standardizedFileURL) + (includeCurrentPDF ? [documentURL.standardizedFileURL] : []))
+                guard allPDFs.count <= 4 else { throw AIChatReferenceResolver.ReferenceError.unavailable("最多可附加或引用 4 个 PDF。") }
+                var requestMessages = AIChatRequestBuilder.messages(
                     instruction: "你是论文阅读助手。依据提供的论文与选文回答；默认使用中文，关键结论注明页码。区分原文与推断，缺少证据时直说，不编造。需要查阅论文时可使用 pdf_reading；需要查阅当前论文工作目录中的文本时可使用 read 或 grep。",
                     paperContext: nil,
                     conversation: recentAIConversation()
                 )
+                if !resolved.context.isEmpty, let last = requestMessages.lastIndex(where: { $0.role == .user }) {
+                    requestMessages[last].content += "\n\n以下是用户明确引用的资料内容：\n\(resolved.context)"
+                }
                 let conversationTitle = conversationKey == nil
                     ? nil
                     : await qwenConversationTitle()
@@ -1846,15 +1866,15 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     try await documentEngine.text(on: page).plainText
                 }
                 let stream = AIChatAgentRunner.run(messages: requestMessages) { messages, round in
-                    let needsPDF = hasPDF && (round == 0 || conversationKey == nil)
+                    let needsPDF = (hasPDF || !referencedPDFs.isEmpty) && (round == 0 || conversationKey == nil)
                     return client.streamChat(messages: messages, configuration: configuration, apiKey: apiKey,
                         conversationKey: conversationKey, conversationTitle: conversationTitle,
                         currentPDFURL: needsPDF && includeCurrentPDF ? document : nil,
-                        additionalPDFURLs: needsPDF ? additionalPDFPaths.map { URL(fileURLWithPath: $0) } : [], tools: AIPaperToolRuntime.definitions)
+                        additionalPDFURLs: needsPDF ? allAdditionalPDFs : [], tools: AIPaperToolRuntime.definitions)
                 } execute: { call in
                     await AIPaperToolRuntime.execute(call, context: context)
                 }
-                aiSidebar.setActivity(hasPDF ? .uploading : .waiting, detail: configuration.model)
+                aiSidebar.setActivity(hasPDF || !referencedPDFs.isEmpty ? .uploading : .waiting, detail: configuration.model)
                 aiSidebar.setMessageActivity(
                     id: placeholder.id,
                     phase: .waiting,
@@ -1954,6 +1974,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 )
             } catch {
                 guard conversationGeneration == aiConversationGeneration else { return }
+                if error is AIChatReferenceResolver.ReferenceError {
+                    aiSidebar.prefill(question, attachments: attachments, includeCurrentPDF: includeCurrentPDF,
+                                      additionalPDFPaths: additionalPDFPaths, references: references)
+                }
                 finishPendingTools("工具调用未完成：\(error.localizedDescription)")
                 let partialContent = accumulator.content
                 if !placeholderCommitted && partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && accumulator.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

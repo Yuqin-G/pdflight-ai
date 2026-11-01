@@ -47,7 +47,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 11, userInfo: [NSLocalizedDescriptionKey: "图片和 PDF 附件卡片必须可见"])
         }
         var submitted = false
-        sidebar.onSend = { text, images, _, pdf, _ in submitted = text == savedText && images == savedImages && pdf }
+        sidebar.onSend = { text, images, _, pdf, _, _ in submitted = text == savedText && images == savedImages && pdf }
         sidebar.sendOrStop()
         guard submitted else { throw NSError(domain: "NativePaperChatSelfCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "发送必须包含草稿和附件"]) }
         submitted = false
@@ -71,7 +71,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 13, userInfo: [NSLocalizedDescriptionKey: "额外 PDF 必须随草稿恢复并显示"])
         }
         var sentExtra: [String] = []
-        sidebar.onSend = { _, _, _, _, paths in sentExtra = paths }
+        sidebar.onSend = { _, _, _, _, paths, _ in sentExtra = paths }
         sidebar.sendOrStop()
         guard sentExtra == [extraPath] else { throw NSError(domain: "NativePaperChatSelfCheck", code: 14, userInfo: [NSLocalizedDescriptionKey: "发送必须包含额外 PDF"]) }
         sidebar.composer.string = "保留文字 /mod 后文"
@@ -102,7 +102,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         sidebar.feedbackButtons[answer.id]?.0.performClick(nil)
         guard feedback == "positive" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "回答反馈必须能切换"]) }
     }
-    var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool, [String]) -> Void)?
+    var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool, [String], [AIChatDraftReference]) -> Void)?
     var onConfigure: (() -> Void)?
     var onNewConversation: (() -> Void)?
     var onSelectConversation: ((String) -> Void)?
@@ -176,6 +176,12 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var composerMenuPanel: NativeModelPanel?
     private var slashMenuOpen = false
     private var dismissedSlashLocation: Int?
+    private var referenceMenuOpen = false
+    private var dismissedReferenceLocation: Int?
+    private var referenceSearchTask: Task<Void, Never>?
+    private var referenceDirectory: URL?
+    private var referenceConversations: [AIConversation] = []
+    private var referenceConversationID: String?
     private var chatZoom: CGFloat = {
         let value = UserDefaults.standard.double(forKey: "reader.nativePaperChatZoom")
         return value >= 0.8 && value <= 2.4 ? value : 1
@@ -330,6 +336,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
 
     private func divider() -> NSView { let view = NSBox(); view.boxType = .separator; return view }
     func setPaperTitle(_ title: String) { toolTip = title; if includePDF { updateAttachments() } }
+    func setReferenceDirectory(_ directory: URL) { referenceDirectory = directory }
     func activate() { }
     func close() { modelPanel?.dismiss(); modelPanel = nil }
     func setModelTitle(_ title: String) {
@@ -377,6 +384,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     func setReplyGestureZoomEnabled(_ enabled: Bool) { }
     func setConversations(_ conversations: [AIConversation], selectedID: String) {
+        referenceConversations = conversations; referenceConversationID = selectedID
         tabs.arrangedSubviews.forEach { tabs.removeArrangedSubview($0); $0.removeFromSuperview() }
         for conversation in conversations.sorted(by: { $0.createdAt < $1.createdAt }) {
             let button = NSButton(title: conversation.title, target: self, action: #selector(selectConversation(_:)))
@@ -557,12 +565,13 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         if !submissions.isEmpty { statusLabel.stringValue = "排队中：\(submissions.count)" }
         else if statusLabel.stringValue.hasPrefix("排队中：") { statusLabel.stringValue = "" }
     }
-    func prefill(_ text: String, attachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false, additionalPDFPaths: [String] = []) {
-        guard composer.string.isEmpty else { return }; composer.string = text; self.attachments = attachments; includePDF = includeCurrentPDF; self.additionalPDFPaths = additionalPDFPaths; updateAttachments(); draftChanged()
+    func prefill(_ text: String, attachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false, additionalPDFPaths: [String] = [], references: [AIChatDraftReference] = []) {
+        guard composer.string.isEmpty && self.attachments.isEmpty && !includePDF && self.additionalPDFPaths.isEmpty else { return }
+        composer.string = text; self.attachments = attachments; includePDF = includeCurrentPDF; self.additionalPDFPaths = additionalPDFPaths; draftReferences = references; updateAttachments(); draftChanged()
     }
     func restoreDraft(_ text: String, attachments: [AIChatImageAttachment], includePDF: Bool, additionalPDFPaths: [String] = [], references: [AIChatDraftReference] = [], command: AIChatDraftCommand? = nil) {
-        composerMenuPanel?.dismiss(); dismissedSlashLocation = nil
-        suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; self.additionalPDFPaths = additionalPDFPaths; draftReferences = references; draftCommand = command; updateAttachments(); resizeComposer(); updateSendButton(); suppressDraftCallback = false
+        referenceSearchTask?.cancel(); composerMenuPanel?.dismiss(); dismissedSlashLocation = nil; dismissedReferenceLocation = nil
+        suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; self.additionalPDFPaths = additionalPDFPaths; draftReferences = references; draftCommand = command; updateAttachments(); refreshReferenceStyling(); resizeComposer(); updateSendButton(); suppressDraftCallback = false
     }
     func insertPrompt(_ text: String) {
         guard !text.isEmpty else { return }
@@ -576,11 +585,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         draftCommand = nil; composer.string = text + composer.string; draftChanged(); focusComposer()
     }
     func focusComposer() { window?.makeFirstResponder(composer) }
-    func clearComposer() { composerMenuPanel?.dismiss(); dismissedSlashLocation = nil; composer.string = ""; attachments = []; includePDF = false; additionalPDFPaths = []; draftReferences = []; draftCommand = nil; updateAttachments(); draftChanged() }
+    func clearComposer() { referenceSearchTask?.cancel(); composerMenuPanel?.dismiss(); dismissedSlashLocation = nil; dismissedReferenceLocation = nil; composer.string = ""; attachments = []; includePDF = false; additionalPDFPaths = []; draftReferences = []; draftCommand = nil; updateAttachments(); draftChanged() }
     func presentHistoryMenu(_ menu: NSMenu) { menu.popUp(positioning: nil, at: .zero, in: recordButton) }
     func textDidChange(_ notification: Notification) {
         if let command = draftCommand, !composer.string.hasPrefix(command.token.trimmingCharacters(in: .whitespacesAndNewlines)) { draftCommand = nil }
-        composer.needsDisplay = true; resizeComposer(); draftChanged(); updateSlashMenu()
+        composer.needsDisplay = true; resizeComposer(); draftChanged(); updateSlashMenu(); updateReferenceMenu()
     }
     func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
         let insertedLength = ((replacementString ?? "") as NSString).length
@@ -612,9 +621,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         composerHeight?.constant = min(336 * chatZoom, max(36 * chatZoom, ceil(height)))
     }
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        if slashMenuOpen, let event = NSApp.currentEvent, let menu = composerMenuPanel?.contentViewController as? NativeComposerMenu {
+        if (slashMenuOpen || referenceMenuOpen), let event = NSApp.currentEvent, let menu = composerMenuPanel?.contentViewController as? NativeComposerMenu {
             if selector == #selector(NSResponder.cancelOperation(_:)) {
-                dismissedSlashLocation = slashTrigger()?.range.location
+                if slashMenuOpen { dismissedSlashLocation = slashTrigger()?.range.location }
+                if referenceMenuOpen { dismissedReferenceLocation = referenceTrigger()?.range.location }
                 composerMenuPanel?.dismiss(); return true
             }
             if !(event.modifierFlags.contains(.shift) && (event.keyCode == 36 || event.keyCode == 76)), menu.handleKey(event) { return true }
@@ -625,7 +635,18 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         return false
     }
-    private func draftChanged() { resizeComposer(); updateSendButton(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF, additionalPDFPaths, draftReferences, draftCommand) } }
+    private func refreshReferenceStyling() {
+        guard let layout = composer.layoutManager else { return }
+        let text = composer.string as NSString, all = NSRange(location: 0, length: text.length)
+        layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: all)
+        layout.removeTemporaryAttribute(.foregroundColor, forCharacterRange: all)
+        for reference in draftReferences where reference.offset >= 0 && reference.length > 0 && reference.offset <= text.length && reference.length <= text.length - reference.offset {
+            let range = NSRange(location: reference.offset, length: reference.length)
+            guard text.substring(with: range) == reference.clipboardText else { continue }
+            layout.addTemporaryAttributes([.backgroundColor: NativeHarnessStyle.code, .foregroundColor: NativeHarnessStyle.link], forCharacterRange: range)
+        }
+    }
+    private func draftChanged() { refreshReferenceStyling(); resizeComposer(); updateSendButton(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF, additionalPDFPaths, draftReferences, draftCommand) } }
     private func updateSendButton() {
         let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty
         let showsStop = busy && !hasContent
@@ -726,7 +747,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         if busy && !hasContent { onCancel?(); return }
         submitDraft()
     }
-    private func submitDraft() { let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty else { return }; onSend?(text, attachments, selectedPreset, includePDF, additionalPDFPaths) }
+    private func submitDraft() { let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty else { return }; onSend?(text, attachments, selectedPreset, includePDF, additionalPDFPaths, draftReferences) }
     @objc private func attach() { presentComposerMenu(query: nil) }
     private func slashTrigger() -> (range: NSRange, query: String)? {
         let selection = composer.selectedRange()
@@ -754,6 +775,70 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         composer.setSelectedRange(NSRange(location: trigger.range.location, length: 0))
         composer.didChangeText()
     }
+    private func referenceTrigger() -> (range: NSRange, query: String)? {
+        let selection = composer.selectedRange(), value = composer.string as NSString
+        guard selection.length == 0, selection.location <= value.length else { return nil }
+        let prefix = value.substring(to: selection.location)
+        guard let regex = try? NSRegularExpression(pattern: "(?:^|\\s)@([^\\s@]*)$"),
+              let match = regex.firstMatch(in: prefix, range: NSRange(location: 0, length: (prefix as NSString).length)) else { return nil }
+        let query = (prefix as NSString).substring(with: match.range(at: 1))
+        return (NSRange(location: match.range(at: 1).location - 1, length: match.range(at: 1).length + 1), query)
+    }
+    private nonisolated static func referenceFiles(in directory: URL, query: String) -> [String] {
+        guard !query.contains("/"), let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { return [] }
+        return files.filter { url in
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+                  !url.lastPathComponent.contains("\""), !url.lastPathComponent.contains("\n") else { return false }
+            let type = UTType(filenameExtension: url.pathExtension)
+            return (url.pathExtension.lowercased() == "pdf" || type?.conforms(to: .plainText) == true) && (query.isEmpty || url.lastPathComponent.localizedCaseInsensitiveContains(query))
+        }.map(\.lastPathComponent).sorted { $0.localizedStandardCompare($1) == .orderedAscending }.prefix(5).map { $0 }
+    }
+    private func updateReferenceMenu() {
+        referenceSearchTask?.cancel()
+        guard let trigger = referenceTrigger(), let directory = referenceDirectory else {
+            dismissedReferenceLocation = nil
+            if referenceMenuOpen { composerMenuPanel?.dismiss() }
+            return
+        }
+        guard dismissedReferenceLocation != trigger.range.location else { return }
+        let conversations = referenceConversations.filter { $0.id != referenceConversationID && (trigger.query.isEmpty || $0.title.localizedCaseInsensitiveContains(trigger.query)) }.prefix(5)
+        referenceSearchTask = Task { [weak self] in
+            let files = await Task.detached { Self.referenceFiles(in: directory, query: trigger.query) }.value
+            guard !Task.isCancelled, let self, self.referenceTrigger()?.range == trigger.range, self.referenceTrigger()?.query == trigger.query else { return }
+            if self.referenceMenuOpen { self.composerMenuPanel?.dismiss() }
+            guard self.composerMenuPanel == nil, let parent = self.window else { return }
+            let fileItems: [NativeComposerMenu.Item] = files.map { name in
+                let mention = name.rangeOfCharacter(from: .whitespacesAndNewlines) == nil ? "@" + name : "@\"" + name + "\""
+                return .init(title: name, token: "", detail: "文件", symbol: "doc", action: { [weak self] in
+                    self?.insertReference(mention: mention, label: name, appearance: "file")
+                })
+            }
+            let sessionItems: [NativeComposerMenu.Item] = conversations.map { conversation in
+                let encoded = ((try? JSONEncoder().encode(conversation.id)) ?? Data()).base64EncodedString()
+                    .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+                let label = conversation.title.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "]", with: "\\]")
+                let mention = "@[\(label)](dsh-session:\(encoded))"
+                return .init(title: conversation.title, token: "", detail: "对话", symbol: "bubble.left", action: { [weak self] in
+                    self?.insertReference(mention: mention, label: conversation.title, appearance: "session", display: "@" + conversation.title)
+                })
+            }
+            guard !fileItems.isEmpty || !sessionItems.isEmpty else { return }
+            let menu = NativeComposerMenu(width: max(280, self.composerCard.bounds.width), groups: [("文件", fileItems), ("对话", sessionItems)], dismiss: { [weak self] in self?.composerMenuPanel?.dismiss() })
+            let panel = NativeModelPanel(controller: menu, parent: parent, anchor: self.composerCard)
+            panel.onDismiss = { [weak self] in self?.composerMenuPanel = nil; self?.slashMenuOpen = false; self?.referenceMenuOpen = false }
+            self.composerMenuPanel = panel; self.referenceMenuOpen = true; panel.present(activate: false)
+        }
+    }
+    private func insertReference(mention: String, label: String, appearance: String, display: String? = nil) {
+        guard let trigger = referenceTrigger() else { return }
+        let visible = display ?? mention
+        let text = visible + " "
+        composer.insertText(text, replacementRange: trigger.range)
+        draftReferences.append(AIChatDraftReference(source: "reference", ref: mention, offset: trigger.range.location,
+            length: (visible as NSString).length, label: label, appearance: appearance, clipboardText: visible))
+        draftReferences.sort { $0.offset < $1.offset }
+        draftChanged(); focusComposer()
+    }
     private func presentComposerMenu(query: String?) {
         if composerMenuPanel != nil { composerMenuPanel?.dismiss(); return }
         guard let parent = window else { return }
@@ -777,7 +862,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         let controller = NativeComposerMenu(width: max(280, composerCard.bounds.width), groups: [("添加", add), ("指令", commands)], dismiss: { [weak self] in self?.composerMenuPanel?.dismiss() })
         let panel = NativeModelPanel(controller: controller, parent: parent, anchor: composerCard)
-        panel.onDismiss = { [weak self] in self?.composerMenuPanel = nil; self?.slashMenuOpen = false }
+        panel.onDismiss = { [weak self] in self?.composerMenuPanel = nil; self?.slashMenuOpen = false; self?.referenceMenuOpen = false }
         composerMenuPanel = panel; slashMenuOpen = fromSlash; panel.present(activate: !fromSlash)
     }
     @objc private func togglePDF() {
