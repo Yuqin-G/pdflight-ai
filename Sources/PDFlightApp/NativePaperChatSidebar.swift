@@ -52,6 +52,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     var onApplyPrompt: ((AIPromptPreset) -> Void)?
     var onSelectModel: ((String) -> Void)?
     var onSelectReasoning: ((String?) -> Void)?
+    var onSelectAccessMode: ((AIChatAccessMode) -> Void)?
 
     private let tabs = NSStackView()
     private let tabScroll = NSScrollView()
@@ -68,6 +69,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private let attachButton = NSButton(title: "+", target: nil, action: nil)
     private let attachmentLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton(title: "选择模型 ▾", target: nil, action: nil)
+    private let accessButton = NSButton(title: "仅可查看 ▾", target: nil, action: nil)
     private let sendButton = NSButton(title: "↑", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
     private let resizeHandle = NativePaperChatResizeHandle()
@@ -87,6 +89,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var modelRoutes: [HarnessModelImport.Route] = []
     private var currentModelRouteID: String?
     private var currentReasoningEffort: String?
+    private var accessMode: AIChatAccessMode = .readOnly
     private var customModelTitle = "自定义模型"
     private var webConversationURL: URL?
     private var chatZoom: CGFloat = {
@@ -178,8 +181,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         attachmentLabel.font = .systemFont(ofSize: 10); attachmentLabel.textColor = .secondaryLabelColor
         modelButton.isBordered = false; modelButton.font = .systemFont(ofSize: 11)
         modelButton.target = self; modelButton.action = #selector(configureModel)
+        accessButton.isBordered = false; accessButton.font = .systemFont(ofSize: 11)
+        accessButton.target = self; accessButton.action = #selector(configureAccess)
         sendButton.isBordered = false; sendButton.target = self; sendButton.action = #selector(sendOrStop)
-        let footer = NSStackView(views: [attachButton, attachmentLabel, NSView(), modelButton, sendButton])
+        let footer = NSStackView(views: [attachButton, accessButton, attachmentLabel, NSView(), modelButton, sendButton])
         footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 6
         composerScroll.translatesAutoresizingMaskIntoConstraints = false; footer.translatesAutoresizingMaskIntoConstraints = false
         composerCard.addSubview(composerScroll); composerCard.addSubview(footer)
@@ -215,6 +220,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     func activate() { }
     func close() { }
     func setModelTitle(_ title: String) { modelButton.title = title.isEmpty ? "选择模型 ▾" : title + " ▾" }
+    func setAccessMode(_ mode: AIChatAccessMode) { accessMode = mode; accessButton.title = mode.title + " ▾" }
     private func setChatZoom(_ value: CGFloat) {
         guard value.isFinite else { return }
         chatZoom = min(2.4, max(0.8, value))
@@ -353,6 +359,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     func setMessageActivity(id: String, phase: AIChatActivityPhase, identity: String) { }
     func setStreaming(_ streaming: Bool) {
         busy = streaming; sendButton.title = streaming ? "■" : "↑"; addButton.isEnabled = !streaming
+        accessButton.isEnabled = !streaming
         for row in tabs.arrangedSubviews { for button in row.subviews.compactMap({ $0 as? NSButton }) { button.isEnabled = !streaming } }
         webButton.isEnabled = !streaming
     }
@@ -393,6 +400,25 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     @objc private func changePreset() { guard let id = presetPopup.selectedItem?.representedObject as? String else { return }; selectedPreset = AIPromptPreset(rawValue: id); onPresetChange?(selectedPreset) }
     @objc private func applyPreset() { onApplyPrompt?(selectedPreset) }
     @objc private func revealHistory() { onRevealCurrentHistory?() }
+    @objc private func configureAccess() {
+        let menu = NSMenu()
+        for mode in AIChatAccessMode.allCases {
+            let item = NSMenuItem(title: mode.title, action: #selector(selectAccess(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = mode.rawValue; item.state = mode == accessMode ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: .zero, in: accessButton)
+    }
+    @objc private func selectAccess(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String, let mode = AIChatAccessMode(rawValue: value), mode != accessMode else { return }
+        if mode == .fullAccess {
+            let alert = NSAlert(); alert.messageText = "确认启用完全权限？"
+            alert.informativeText = "启用后，助手可以执行命令、修改文件并访问工作区以外的内容。"
+            alert.addButton(withTitle: "启用完全权限"); alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        setAccessMode(mode); onSelectAccessMode?(mode)
+    }
     @objc private func openWebConversation() { if let webConversationURL { NSWorkspace.shared.open(webConversationURL) } }
     @objc private func configureModel() {
         guard !modelRoutes.isEmpty else { onConfigure?(); return }

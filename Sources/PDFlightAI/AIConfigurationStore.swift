@@ -119,6 +119,9 @@ public final class AIConfigurationStore {
     }
 
     public func importCatalogIfNeeded(_ catalog: HarnessModelImport.Catalog) throws {
+        if userDefaults.string(forKey: keyPrefix + ".defaultAccessMode") == nil, let mode = catalog.defaultAccessMode {
+            userDefaults.set(mode.rawValue, forKey: keyPrefix + ".defaultAccessMode")
+        }
         guard userDefaults.data(forKey: keyPrefix + ".modelRoutes") == nil else { return }
         for (provider, secret) in catalog.secrets {
             try KeychainAISecretStore(service: catalogSecretsService, account: "provider:" + provider).saveAPIKey(secret)
@@ -133,6 +136,9 @@ public final class AIConfigurationStore {
     }
 
     public func defaultRouteID() -> String? { userDefaults.string(forKey: keyPrefix + ".defaultRoute") }
+    public func defaultAccessMode() -> AIChatAccessMode {
+        userDefaults.string(forKey: keyPrefix + ".defaultAccessMode").flatMap(AIChatAccessMode.init(rawValue:)) ?? .readOnly
+    }
 
     public func apiKey(for route: HarnessModelImport.Route) throws -> String {
         try KeychainAISecretStore(service: catalogSecretsService, account: "provider:" + route.provider).loadAPIKey()

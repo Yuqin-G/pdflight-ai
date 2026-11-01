@@ -131,6 +131,8 @@ enum PDFlightAIChecks {
         print("PASS: native PDF and workspace tools return grounded results and reject traversal")
         try await nativeAgentRunsToolRoundTrips()
         print("PASS: native agent executes tool calls and feeds their results back to the model")
+        try await nativeShellToolHandlesExitAndTimeout()
+        print("PASS: approved native shell commands preserve output, exit status and timeout")
         let displayEvents = [AIChatMessage(role: .user, content: "question"), AIChatMessage(role: .tool, content: "private tool event"), AIChatMessage(role: .assistant, content: "", reasoning: "thinking"), AIChatMessage(role: .assistant, content: "answer")]
         let requestEvents = AIChatRequestBuilder.messages(instruction: nil, paperContext: nil, conversation: displayEvents)
         try check(requestEvents.map(\.role) == [.user, .assistant], "display-only tool and thinking events must not become fake model turns")
@@ -289,6 +291,14 @@ enum PDFlightAIChecks {
                   - id: anthropic-model
                     name: Anthropic model
                     maxTokens: 65500
+        - id: permission
+          name: "@deepseek-ai/dsh-permission-presets"
+          config:
+            defaultPreset: danger-full-access
+            presets:
+              danger-full-access:
+                sandbox: danger-full-access
+                approval: never
         """
         try yaml.write(to: profile, atomically: true, encoding: .utf8)
         try "refs:\n  PDFLIGHT_FIXTURE_MISSING_KEY: fixture-secret\n".write(to: credentials, atomically: true, encoding: .utf8)
@@ -296,6 +306,7 @@ enum PDFlightAIChecks {
         try check(selected.provider == "test-provider" && selected.configuration.model == "test-model", "expected configured default model")
         try check(selected.configuration.baseURL == "http://127.0.0.1:3425/v1" && selected.apiKey == "fixture-secret", "expected selected gateway and credential")
         let catalog = try HarnessModelImport.readCatalog(profile: profile, credentials: credentials)
+        try check(catalog.defaultAccessMode == .fullAccess, "explicit Harness full-access configuration should be imported")
         try check(catalog.routes.count == 3 && catalog.selectedID == "test-provider/test-model", "expected all model routes and the selected model")
         try check(catalog.routes.allSatisfy(\.isSupported) && catalog.secrets["test-provider"] == "fixture-secret", "expected supported protocols and private provider credential")
         try check(catalog.routes.first(where: { $0.model == "anthropic-model" })?.maxTokens == 65500, "model output limit must be imported")
@@ -336,6 +347,28 @@ enum PDFlightAIChecks {
         try check(anthropicResult.toolCalls == [.init(id: "tool_1", name: "grep", arguments: #"{"q":"x"}"#)], "Anthropic tool-use blocks must preserve arguments")
     }
 
+    private static func nativeShellToolHandlesExitAndTimeout() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pdflight-shell-check-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let result = await AIChatShellTool.run(command: "printf stdout-ok; printf stderr-ok >&2; exit 7", workingDirectory: directory)
+        try check(result.isError && result.content.contains("stdout-ok") && result.content.contains("stderr-ok") && result.content.contains("退出码 7"), "shell must preserve output and nonzero exit")
+        let started = Date()
+        let timeout = await AIChatShellTool.run(command: "sleep 10", workingDirectory: directory, timeout: 0.15)
+        try check(timeout.isError && timeout.content.contains("超时") && Date().timeIntervalSince(started) < 4, "timed-out commands must stop promptly")
+        let flood = await AIChatShellTool.run(command: "yes x | head -c 200000", workingDirectory: directory)
+        try check(!flood.isError && flood.content.contains("输出已截断") && flood.content.utf8.count < 65_000, "large output must be drained without unbounded memory or disk use")
+        let task = Task { await AIChatShellTool.run(command: "sleep 10", workingDirectory: directory) }
+        try await Task.sleep(for: .milliseconds(150)); task.cancel()
+        let cancelled = await task.value
+        try check(cancelled.isError && cancelled.content.contains("取消"), "cancelling chat must terminate its shell process")
+        let children = Task { await AIChatShellTool.run(command: "trap '' TERM; (trap '' TERM; sleep 1; printf surviving > marker) & wait", workingDirectory: directory) }
+        try await Task.sleep(for: .milliseconds(150)); children.cancel()
+        _ = await children.value
+        try await Task.sleep(for: .milliseconds(1200))
+        try check(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("marker").path), "cancellation must terminate TERM-resistant child processes")
+    }
+
     private static func nativeAgentRunsToolRoundTrips() async throws {
         let context = AIPaperToolContext(documentURL: URL(fileURLWithPath: "/tmp/paper.pdf"), workspaceURL: URL(fileURLWithPath: "/tmp"), pageCount: 1) { _ in "Evidence from page one" }
         let model: AIChatAgentRunner.Model = { messages, round in
@@ -369,7 +402,10 @@ enum PDFlightAIChecks {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try "alpha\nneedle line\nomega".write(to: root.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
-        let context = AIPaperToolContext(documentURL: root.appendingPathComponent("paper.pdf"), workspaceURL: root, pageCount: 2) { page in
+        let context = AIPaperToolContext(documentURL: root.appendingPathComponent("paper.pdf"), workspaceURL: root, pageCount: 2,
+                                         listLibrary: { "library fixture" }, listPrompts: { "prompt fixture" },
+                                         runSubagent: { description, prompt in "delegated: \(description) / \(prompt)" },
+                                         runShell: { command, description, timeout in .init(content: "\(description): \(command), timeout \(timeout ?? 0)", isError: true) }) { page in
             page == 0 ? "introduction" : "key method on page two"
         }
         func call(_ name: String, _ arguments: String) async -> AIChatToolResult {
@@ -387,6 +423,13 @@ enum PDFlightAIChecks {
         try check(traversal.isError, "workspace tools must reject directory traversal")
         let invalid = await call("read", "not JSON")
         try check(invalid.isError, "invalid tool arguments must return an error result")
+        let shell = await call("bash", #"{"command":"printf fixture","description":"check","timeout":3}"#)
+        try check(shell.isError && shell.content == "check: printf fixture, timeout 3", "shell executor and its errors must be passed through")
+        let library = await call("pdf_reading", #"{"action":"library"}"#)
+        let prompts = await call("pdf_reading", #"{"action":"prompts"}"#)
+        let child = await call("subagent", #"{"description":"verify","prompt":"check the method"}"#)
+        try check(library.content == "library fixture" && prompts.content == "prompt fixture", "library and prompt actions must use the supplied native stores")
+        try check(child.content == "delegated: verify / check the method" && !child.isError, "subagent must dispatch the requested task")
     }
 
     private static func toolRequestsPreserveProviderProtocol() throws {

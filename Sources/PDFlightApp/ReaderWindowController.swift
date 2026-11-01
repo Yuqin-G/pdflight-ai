@@ -1062,6 +1062,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             aiSidebar.setModelRoutes(aiConfigurationStore.modelRoutes(), selectedID: routeID, reasoningEffort: effort, customModel: aiConfigurationStore.configuration().model)
             persistAIHistory()
         }
+        aiSidebar.onSelectAccessMode = { [weak self] mode in
+            guard let self, let index = activeAIConversationIndex else { return }
+            aiHistory?.conversations[index].accessMode = mode
+            persistAIHistory()
+        }
         aiSidebar.onApplyPrompt = { [weak self] preset in
             guard let self else { return }
             aiSidebar.insertPrompt(NativePaperPrompts.text(for: preset.rawValue, title: paperTitle, page: currentPage + 1, selection: selectedPDFText()))
@@ -1804,7 +1809,40 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 let client = aiClient
                 let document = documentURL
                 let documentEngine = engine
-                let context = AIPaperToolContext(documentURL: document, workspaceURL: document.deletingLastPathComponent(), pageCount: pageCount) { page in
+                let library = paperLibraryStore
+                let prompts = NativePaperPrompts.templates.map(\.name).joined(separator: "\n")
+                let accessMode = activeAIConversationIndex.flatMap { aiHistory?.conversations[$0].accessMode } ?? aiConfigurationStore.defaultAccessMode()
+                let listLibrary: @Sendable () async throws -> String = {
+                    let snapshot = try await library.snapshot()
+                    return snapshot.papers.prefix(500).map { "\($0.displayTitle)\t\($0.path)" }.joined(separator: "\n")
+                }
+                let listPrompts: @Sendable () async throws -> String = { prompts }
+                let runShell: @Sendable (String, String, Int?) async -> AIChatToolResult = { command, _, timeout in
+                    guard accessMode == .fullAccess else { return AIChatToolResult(content: "当前为仅可查看模式，不能执行命令。", isError: true) }
+                    return await AIChatShellTool.run(command: command, workingDirectory: document.deletingLastPathComponent(), timeout: TimeInterval(timeout ?? 120))
+                }
+                let baseContext = AIPaperToolContext(documentURL: document, workspaceURL: document.deletingLastPathComponent(), pageCount: pageCount, allowOutsideWorkspace: accessMode == .fullAccess,
+                    listLibrary: listLibrary, listPrompts: listPrompts, runShell: runShell) { page in
+                    try await documentEngine.text(on: page).plainText
+                }
+                let runSubagent: @Sendable (String, String) async throws -> String = { description, prompt in
+                    let childKey = AIConversationRouting.conversationKey(for: UUID().uuidString, configuration: configuration)
+                    let childMessages = [AIChatMessage(role: .system, content: "你是论文阅读助手的子任务执行者。独立核对论文证据，回答时注明页码，不要编造。"),
+                                         AIChatMessage(role: .user, content: prompt)]
+                    let childTools = AIPaperToolRuntime.definitions.filter { $0.name != "subagent" }
+                    let child = AIChatAgentRunner.run(messages: childMessages, maximumRounds: 8) { messages, _ in
+                        client.streamChat(messages: messages, configuration: configuration, apiKey: apiKey,
+                            conversationKey: childKey, conversationTitle: description, tools: childTools)
+                    } execute: { call in await AIPaperToolRuntime.execute(call, context: baseContext) }
+                    var answer = ""
+                    for try await event in child {
+                        try Task.checkCancellation()
+                        if case .assistantCompleted(let message) = event, (message.toolCalls ?? []).isEmpty { answer = message.content }
+                    }
+                    return answer
+                }
+                let context = AIPaperToolContext(documentURL: document, workspaceURL: document.deletingLastPathComponent(), pageCount: pageCount, allowOutsideWorkspace: accessMode == .fullAccess,
+                    listLibrary: listLibrary, listPrompts: listPrompts, runSubagent: runSubagent, runShell: runShell) { page in
                     try await documentEngine.text(on: page).plainText
                 }
                 let stream = AIChatAgentRunner.run(messages: requestMessages) { messages, round in
@@ -2068,6 +2106,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiSidebar.install(aiMessages)
         let routeID = history.conversations[index].modelRouteID ?? aiConfigurationStore.defaultRouteID()
         aiSidebar.setModelRoutes(aiConfigurationStore.modelRoutes(), selectedID: routeID, reasoningEffort: history.conversations[index].reasoningEffort, customModel: aiConfigurationStore.configuration().model)
+        aiSidebar.setAccessMode(history.conversations[index].accessMode ?? aiConfigurationStore.defaultAccessMode())
         aiSidebar.setWebConversationURL(history.conversations[index].webConversationURL)
         let draft = (try? aiChatHistoryStore.readDraft(sessionID: conversationID, for: documentURL))
             ?? history.conversations[index].draft ?? AIChatDraft()

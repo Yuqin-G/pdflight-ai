@@ -162,6 +162,18 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+public enum AIChatAccessMode: String, Codable, Sendable, CaseIterable {
+    case readOnly = "read-only"
+    case fullAccess = "full-access"
+
+    public var title: String {
+        switch self {
+        case .readOnly: return "仅可查看"
+        case .fullAccess: return "完全权限"
+        }
+    }
+}
+
 public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public var title: String
@@ -174,6 +186,7 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
     public var webConversationKey: String?
     public var webConversationURL: String?
     public var reasoningEffort: String?
+    public var accessMode: AIChatAccessMode?
 
     public init(
         id: String = UUID().uuidString,
@@ -186,7 +199,8 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
         modelRouteID: String? = nil,
         webConversationKey: String? = nil,
         webConversationURL: String? = nil,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        accessMode: AIChatAccessMode? = nil
     ) {
         self.id = id
         self.title = title
@@ -199,6 +213,7 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
         self.webConversationKey = webConversationKey
         self.webConversationURL = webConversationURL
         self.reasoningEffort = reasoningEffort
+        self.accessMode = accessMode
     }
 }
 

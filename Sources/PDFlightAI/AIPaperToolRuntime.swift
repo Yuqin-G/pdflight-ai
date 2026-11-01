@@ -4,10 +4,22 @@ public struct AIPaperToolContext: Sendable {
     public let documentURL: URL
     public let workspaceURL: URL
     public let pageCount: Int
+    public let allowOutsideWorkspace: Bool
     public let readPage: @Sendable (Int) async throws -> String
+    public let listLibrary: @Sendable () async throws -> String
+    public let listPrompts: @Sendable () async throws -> String
+    public let runSubagent: (@Sendable (String, String) async throws -> String)?
+    public let runShell: (@Sendable (String, String, Int?) async -> AIChatToolResult)?
 
-    public init(documentURL: URL, workspaceURL: URL, pageCount: Int, readPage: @escaping @Sendable (Int) async throws -> String) {
-        self.documentURL = documentURL; self.workspaceURL = workspaceURL; self.pageCount = pageCount; self.readPage = readPage
+    public init(documentURL: URL, workspaceURL: URL, pageCount: Int, allowOutsideWorkspace: Bool = false,
+                listLibrary: @escaping @Sendable () async throws -> String = { "论文库暂不可用。" },
+                listPrompts: @escaping @Sendable () async throws -> String = { "提示词列表暂不可用。" },
+                runSubagent: (@Sendable (String, String) async throws -> String)? = nil,
+                runShell: (@Sendable (String, String, Int?) async -> AIChatToolResult)? = nil,
+                readPage: @escaping @Sendable (Int) async throws -> String) {
+        self.documentURL = documentURL; self.workspaceURL = workspaceURL; self.pageCount = pageCount; self.allowOutsideWorkspace = allowOutsideWorkspace; self.readPage = readPage
+        self.listLibrary = listLibrary; self.listPrompts = listPrompts; self.runSubagent = runSubagent
+        self.runShell = runShell
     }
 }
 
@@ -28,6 +40,10 @@ public enum AIPaperToolRuntime {
         var limit: Int?
         var pattern: String?
         var path: String?
+        var description: String?
+        var prompt: String?
+        var command: String?
+        var timeout: Int?
     }
 
     private static func schema(_ properties: [String: AIJSONValue], required: [String]) -> AIJSONValue {
@@ -38,7 +54,7 @@ public enum AIPaperToolRuntime {
 
     public static let definitions: [AIChatToolDefinition] = [
         .init(name: "pdf_reading", description: "Read or search the currently open PDF. Page numbers are one-based; cite the page number in answers.", parameters: schema([
-            "action": .object(["type": .string("string"), "enum": .array([.string("read_page"), .string("search")])]),
+            "action": .object(["type": .string("string"), "enum": .array([.string("read_page"), .string("search"), .string("library"), .string("prompts")])]),
             "page": integer("One-based page number for read_page."), "pattern": string("Literal text to search for in the PDF.")
         ], required: ["action"])),
         .init(name: "read", description: "Read a UTF-8 text file in the paper workspace with line numbers.", parameters: schema([
@@ -47,7 +63,14 @@ public enum AIPaperToolRuntime {
         ], required: ["file_path"])),
         .init(name: "grep", description: "Search UTF-8 text files in the paper workspace using a regular expression.", parameters: schema([
             "pattern": string("Regular expression to search for."), "path": string("A file or directory within the paper workspace.")
-        ], required: ["pattern"]))
+        ], required: ["pattern"])),
+        .init(name: "subagent", description: "Delegate a focused research subtask to an independent assistant with access to the same paper and reading tools.", parameters: schema([
+            "description": string("Short label for the subtask."), "prompt": string("Self-contained task and expected evidence.")
+        ], required: ["description", "prompt"])),
+        .init(name: "bash", description: "Run a shell command in the paper workspace, subject to the selected access mode.", parameters: schema([
+            "description": string("Short purpose of the command."), "command": string("Shell command to run."),
+            "timeout": integer("Optional timeout in seconds (maximum 600).")
+        ], required: ["command"]))
     ]
 
     public static func execute(_ call: AIChatToolCall, context: AIPaperToolContext) async -> AIChatToolResult {
@@ -59,6 +82,14 @@ public enum AIPaperToolRuntime {
             case "pdf_reading": output = try await pdf(args, context: context)
             case "read": output = try read(args, context: context)
             case "grep": output = try grep(args, context: context)
+            case "subagent":
+                guard let prompt = args.prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let delegate = context.runSubagent else { throw ToolError.message("子任务不可用或缺少 prompt。") }
+                output = try await delegate(args.description ?? "子任务", prompt)
+            case "bash":
+                guard let command = args.command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let runShell = context.runShell else { throw ToolError.message("命令执行不可用或缺少 command。") }
+                return await runShell(command, args.description ?? "执行命令", args.timeout)
             default: throw ToolError.message("未知工具：\(call.name)")
             }
             return AIChatToolResult(content: output)
@@ -94,15 +125,17 @@ public enum AIPaperToolRuntime {
                 }
             }
             return matches.isEmpty ? "未找到匹配的 PDF 文本。" : matches.joined(separator: "\n\n")
-        default: throw ToolError.message("pdf_reading 支持 read_page 和 search。")
+        case "library": return try await context.listLibrary()
+        case "prompts": return try await context.listPrompts()
+        default: throw ToolError.message("pdf_reading 支持 read_page、search、library 和 prompts。")
         }
     }
 
-    private static func resolved(_ path: String, root: URL) throws -> URL {
+    private static func resolved(_ path: String, root: URL, allowOutside: Bool) throws -> URL {
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let candidate = (path.hasPrefix("/") ? URL(fileURLWithPath: path) : root.appendingPathComponent(path))
             .standardizedFileURL.resolvingSymlinksInPath()
-        guard candidate.path == root.path || candidate.path.hasPrefix(root.path.hasSuffix("/") ? root.path : root.path + "/") else {
+        guard allowOutside || candidate.path == root.path || candidate.path.hasPrefix(root.path.hasSuffix("/") ? root.path : root.path + "/") else {
             throw ToolError.message("文件不在当前论文的工作目录内。")
         }
         return candidate
@@ -110,7 +143,7 @@ public enum AIPaperToolRuntime {
 
     private static func read(_ args: Arguments, context: AIPaperToolContext) throws -> String {
         guard let path = args.file_path, !path.isEmpty else { throw ToolError.message("缺少 file_path。") }
-        let url = try resolved(path, root: context.workspaceURL)
+        let url = try resolved(path, root: context.workspaceURL, allowOutside: context.allowOutsideWorkspace)
         guard url.pathExtension.lowercased() != "pdf" else { throw ToolError.message("请使用 pdf_reading 读取 PDF。") }
         let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
         guard values.isRegularFile == true, (values.fileSize ?? 0) <= 4 * 1_024 * 1_024 else { throw ToolError.message("只能读取不超过 4 MB 的普通文本文件。") }
@@ -124,7 +157,7 @@ public enum AIPaperToolRuntime {
     private static func grep(_ args: Arguments, context: AIPaperToolContext) throws -> String {
         guard let pattern = args.pattern, !pattern.isEmpty, pattern.count <= 500 else { throw ToolError.message("缺少有效的搜索表达式。") }
         let regex = try NSRegularExpression(pattern: pattern)
-        let root = try resolved(args.path ?? ".", root: context.workspaceURL)
+        let root = try resolved(args.path ?? ".", root: context.workspaceURL, allowOutside: context.allowOutsideWorkspace)
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else { throw ToolError.message("搜索路径不存在。") }
         var files: [URL] = []
@@ -135,7 +168,7 @@ public enum AIPaperToolRuntime {
         var matches: [String] = []
         for file in files {
             try Task.checkCancellation()
-            guard let safe = try? resolved(file.path, root: context.workspaceURL) else { continue }
+            guard let safe = try? resolved(file.path, root: context.workspaceURL, allowOutside: context.allowOutsideWorkspace) else { continue }
             guard let values = try? safe.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), values.isRegularFile == true,
                   (values.fileSize ?? 0) <= 1_024 * 1_024, let text = try? String(contentsOf: safe, encoding: .utf8) else { continue }
             for (index, line) in text.components(separatedBy: .newlines).enumerated() {

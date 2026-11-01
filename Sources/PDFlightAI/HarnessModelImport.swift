@@ -20,6 +20,7 @@ public enum HarnessModelImport {
         public let routes: [Route]
         public let secrets: [String: String]
         public let selectedID: String
+        public let defaultAccessMode: AIChatAccessMode?
     }
     public struct Selection: Sendable {
         public let provider: String
@@ -101,6 +102,10 @@ public enum HarnessModelImport {
                                     maxTokens: item["maxTokens"] as? Int))
             }
         }
-        return Catalog(routes: routes, secrets: secrets, selectedID: selectedProvider + "/" + selectedModel)
+        let permission = patches.last(where: { $0["name"] as? String == "@deepseek-ai/dsh-permission-presets" && ($0["disabled"] as? Bool) != true })?["config"] as? [String: Any]
+        let preset = permission?["defaultPreset"] as? String
+        let presetConfig = (permission?["presets"] as? [String: Any])?[preset ?? ""] as? [String: Any]
+        let mode: AIChatAccessMode? = preset == "danger-full-access" && presetConfig?["sandbox"] as? String == "danger-full-access" && presetConfig?["approval"] as? String == "never" ? .fullAccess : (preset == "read-only" ? .readOnly : nil)
+        return Catalog(routes: routes, secrets: secrets, selectedID: selectedProvider + "/" + selectedModel, defaultAccessMode: mode)
     }
 }
