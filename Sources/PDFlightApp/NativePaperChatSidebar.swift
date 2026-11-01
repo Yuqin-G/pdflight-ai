@@ -30,6 +30,16 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         sidebar.onSend = { text, images, _, pdf in submitted = text == savedText && images == savedImages && pdf }
         sidebar.sendOrStop()
         guard submitted else { throw NSError(domain: "NativePaperChatSelfCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "发送必须包含草稿和附件"]) }
+        submitted = false
+        sidebar.setStreaming(true)
+        _ = sidebar.textView(sidebar.composer, doCommandBy: #selector(NSResponder.insertNewline(_:)))
+        guard submitted else { throw NSError(domain: "NativePaperChatSelfCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "回复期间按回车必须排队发送草稿"]) }
+        submitted = false; sidebar.sendOrStop()
+        guard submitted else { throw NSError(domain: "NativePaperChatSelfCheck", code: 8, userInfo: [NSLocalizedDescriptionKey: "回复期间有草稿时按钮必须发送草稿"]) }
+        sidebar.clearComposer()
+        var stopped = false; sidebar.onCancel = { stopped = true }; sidebar.sendOrStop()
+        guard stopped else { throw NSError(domain: "NativePaperChatSelfCheck", code: 9, userInfo: [NSLocalizedDescriptionKey: "回复期间没有草稿时按钮必须停止回复"]) }
+        sidebar.setStreaming(false)
         let pdfMessage = AIChatMessage(role: .user, content: "阅读附件", pdfAttachmentName: "paper.pdf")
         sidebar.append(pdfMessage)
         let row = sidebar.messageRows[pdfMessage.id] as? NSStackView
@@ -447,7 +457,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         for row in tabs.arrangedSubviews { for button in row.subviews.compactMap({ $0 as? NSButton }) { button.isEnabled = !streaming } }
         webButton.isEnabled = !streaming
     }
-    func setQueuedSubmissions(_ submissions: [AIChatSubmission]) { if !submissions.isEmpty { statusLabel.stringValue = "排队中：\(submissions.count)" } }
+    func setQueuedSubmissions(_ submissions: [AIChatSubmission]) {
+        if !submissions.isEmpty { statusLabel.stringValue = "排队中：\(submissions.count)" }
+        else if statusLabel.stringValue.hasPrefix("排队中：") { statusLabel.stringValue = "" }
+    }
     func prefill(_ text: String, attachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false) {
         guard composer.string.isEmpty else { return }; composer.string = text; self.attachments = attachments; includePDF = includeCurrentPDF; updateAttachments(); draftChanged()
     }
@@ -475,16 +488,17 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         if selector == #selector(NSResponder.insertNewline(_:)),
-           !(NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false), !busy {
-            sendOrStop(); return true
+           !(NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false) {
+            submitDraft(); return true
         }
         return false
     }
     private func draftChanged() { resizeComposer(); updateSendButton(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF) } }
     private func updateSendButton() {
         let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF
+        let showsStop = busy && !hasContent
         sendButton.isEnabled = busy || hasContent
-        sendButton.attributedTitle = NSAttributedString(string: busy ? "■" : "↑", attributes: [.font: NSFont.systemFont(ofSize: busy ? 13 : 19, weight: .medium), .foregroundColor: hasContent || busy ? NativeHarnessStyle.primary : NativeHarnessStyle.caption])
+        sendButton.attributedTitle = NSAttributedString(string: showsStop ? "■" : "↑", attributes: [.font: NSFont.systemFont(ofSize: showsStop ? 13 : 19, weight: .medium), .foregroundColor: hasContent || busy ? NativeHarnessStyle.primary : NativeHarnessStyle.caption])
     }
     private func updateAttachments() { attachmentLabel.stringValue = ([includePDF ? "PDF" : nil, attachments.isEmpty ? nil : "\(attachments.count) 张图片"].compactMap { $0 }).joined(separator: " · ") }
     private func scrollToBottom() { let clip = messagesScroll.contentView; let h = messagesStack.frame.height; clip.scroll(to: NSPoint(x: 0, y: max(0, h - clip.bounds.height))); messagesScroll.reflectScrolledClipView(clip) }
@@ -540,7 +554,12 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         panel.onDismiss = { [weak self] in self?.modelPanel = nil }
         modelPanel = panel; panel.present()
     }
-    @objc private func sendOrStop() { if busy { onCancel?(); return }; let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF else { return }; onSend?(text, attachments, selectedPreset, includePDF) }
+    @objc private func sendOrStop() {
+        let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF
+        if busy && !hasContent { onCancel?(); return }
+        submitDraft()
+    }
+    private func submitDraft() { let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF else { return }; onSend?(text, attachments, selectedPreset, includePDF) }
     @objc private func attach() {
         let menu = NSMenu(); menu.addItem(withTitle: includePDF ? "移除当前 PDF" : "附加当前 PDF", action: #selector(togglePDF), keyEquivalent: "").target = self
         menu.addItem(withTitle: "添加图片…", action: #selector(addImage), keyEquivalent: "").target = self

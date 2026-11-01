@@ -1605,7 +1605,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             aiHistoryLoaded = true
             let conversationID = pendingAIConversationID ?? history.activeConversationID
             pendingAIConversationID = nil
-            activateAIConversation(conversationID, persistSelection: false)
+            activateAIConversation(conversationID, persistSelection: false, preserveQueue: true)
             processNextAISubmissionIfNeeded()
         }
     }
@@ -1624,6 +1624,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         )
         guard aiTask == nil, aiHistoryLoaded else {
             aiSubmissionQueue.enqueue(submission)
+            aiSidebar.clearComposer()
             refreshQueuedAISubmissions()
             if !aiHistoryLoaded {
                 aiSidebar.setActivity(.loading, detail: "Opening this PDF's local conversation")
@@ -1637,14 +1638,14 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         guard aiTask == nil, aiHistoryLoaded,
               let submission = aiSubmissionQueue.dequeue() else { return }
         refreshQueuedAISubmissions()
-        startAIMessage(submission)
+        startAIMessage(submission, clearComposer: false)
     }
 
     private func refreshQueuedAISubmissions() {
         aiSidebar.setQueuedSubmissions(aiSubmissionQueue.submissions)
     }
 
-    private func startAIMessage(_ submission: AIChatSubmission) {
+    private func startAIMessage(_ submission: AIChatSubmission, clearComposer: Bool = true) {
         guard aiTask == nil else {
             aiSubmissionQueue.enqueue(submission)
             refreshQueuedAISubmissions()
@@ -1684,7 +1685,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 includeCurrentPDF: includeCurrentPDF
             )
             if showAISettings() {
-                startAIMessage(submission)
+                startAIMessage(submission, clearComposer: clearComposer)
             } else {
                 aiSidebar.setActivity(.failed, detail: "Choose an AI provider and model before sending")
             }
@@ -1726,7 +1727,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             imageAttachments: attachments,
             pdfAttachmentName: includeCurrentPDF ? documentURL.lastPathComponent : nil
         )
-        aiSidebar.clearComposer()
+        if clearComposer { aiSidebar.clearComposer() }
         aiMessages.append(userMessage)
         aiSidebar.append(userMessage)
         persistAIHistory()
@@ -2081,7 +2082,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         return aiHistory.conversations.firstIndex { $0.id == aiHistory.activeConversationID }
     }
 
-    private func activateAIConversation(_ conversationID: String, persistSelection: Bool) {
+    private func activateAIConversation(_ conversationID: String, persistSelection: Bool, preserveQueue: Bool = false) {
         guard var history = aiHistory else {
             pendingAIConversationID = conversationID
             return
@@ -2091,13 +2092,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             if history.conversations.isEmpty { history.conversations = [fallback] }
             history.activeConversationID = fallback.id
             aiHistory = history
-            activateAIConversation(fallback.id, persistSelection: persistSelection)
+            activateAIConversation(fallback.id, persistSelection: persistSelection, preserveQueue: preserveQueue)
             return
         }
 
         aiTask?.cancel()
         aiConversationGeneration += 1
-        aiSubmissionQueue.removeAll()
+        if !preserveQueue { aiSubmissionQueue.removeAll() }
         refreshQueuedAISubmissions()
         history.activeConversationID = conversationID
         aiHistory = history
