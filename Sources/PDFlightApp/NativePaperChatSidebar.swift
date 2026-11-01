@@ -24,6 +24,12 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard markdown.renderedTextForLayoutCheck().contains("第一行\n第二行") else {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 21, userInfo: [NSLocalizedDescriptionKey: "Markdown 硬换行必须保留"])
         }
+        for firstLine in ["**测试回复 15**：正文", "普通中文段落", "**Bold** text", "- 列表项目"] {
+            markdown.setContent(firstLine, renderMarkdown: true)
+            guard let offset = markdown.firstGlyphOffsetForLayoutCheck(), offset >= 2 else {
+                throw NSError(domain: "NativePaperChatSelfCheck", code: 28, userInfo: [NSLocalizedDescriptionKey: "消息首字必须保留字形绘制空间"])
+            }
+        }
         let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 440, height: 700))
         var savedText = ""; var savedImages: [AIChatImageAttachment] = []; var savedPDF = false
         sidebar.onDraftChange = { text, images, pdf, _, _, _ in savedText = text; savedImages = images; savedPDF = pdf }

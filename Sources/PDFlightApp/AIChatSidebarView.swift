@@ -2042,6 +2042,19 @@ final class AIChatRenderedContentView: NSStackView {
         textFields(in: self).map(\.stringValue).joined(separator: "\n")
     }
 
+    func firstGlyphOffsetForLayoutCheck() -> CGFloat? {
+        guard let field = textFields(in: self).first, field.attributedStringValue.length > 0 else { return nil }
+        let text = NSTextStorage(attributedString: field.attributedStringValue)
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: 600, height: 10_000))
+        container.lineFragmentPadding = 0
+        layout.addTextContainer(container)
+        text.addLayoutManager(layout)
+        layout.ensureLayout(for: container)
+        guard layout.numberOfGlyphs > 0 else { return nil }
+        return layout.location(forGlyphAt: 0).x
+    }
+
     func acceptsFocusForLayoutCheck() -> Bool {
         textFields(in: self).contains { $0.acceptsFirstResponder }
     }
@@ -2386,16 +2399,22 @@ final class AIChatRenderedContentView: NSStackView {
         if harnessTypography {
             paragraphStyle.minimumLineHeight = harnessHeadingLineHeight ?? (resolvedSize + (rendersMarkdown ? 10 : 8) * bodyFontSize / 14)
             paragraphStyle.paragraphSpacing = paragraphSpacing ?? 0
+            // Leave room inside the text field for the ink of the first
+            // glyph, including fallback CJK and bold fonts, to overhang.
+            let inset = max(2, ceil(resolvedSize * 0.15))
+            paragraphStyle.firstLineHeadIndent = inset
+            paragraphStyle.headIndent = inset
         } else {
             paragraphStyle.lineSpacing = max(3, resolvedSize * 0.42)
             paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(5, resolvedSize * 0.5)
         }
         if let hangingIndent {
-            paragraphStyle.headIndent = hangingIndent.leading + hangingIndent.indent
-            paragraphStyle.firstLineHeadIndent = hangingIndent.leading
+            let inset = harnessTypography ? max(2, ceil(resolvedSize * 0.15)) : 0
+            paragraphStyle.headIndent = hangingIndent.leading + hangingIndent.indent + inset
+            paragraphStyle.firstLineHeadIndent = hangingIndent.leading + inset
             paragraphStyle.tabStops = [NSTextTab(
                 textAlignment: .left,
-                location: hangingIndent.leading + hangingIndent.indent
+                location: hangingIndent.leading + hangingIndent.indent + inset
             )]
         }
         let styled: NSMutableAttributedString
