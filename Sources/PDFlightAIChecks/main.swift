@@ -123,6 +123,14 @@ enum PDFlightAIChecks {
         print("PASS: Harness model selection and credential are read without changing the source")
         try alternateModelProtocolsEncodeAndStream()
         print("PASS: Responses and Anthropic routes send and decode their own streaming protocols")
+        try streamedToolCallsAreReassembledAcrossProviders()
+        print("PASS: streamed tool calls preserve IDs, interleaving and arguments across providers")
+        try toolRequestsPreserveProviderProtocol()
+        print("PASS: tool schemas, calls and results use the correct provider protocol")
+        try await nativePaperToolsReadAndSearchSafely()
+        print("PASS: native PDF and workspace tools return grounded results and reject traversal")
+        try await nativeAgentRunsToolRoundTrips()
+        print("PASS: native agent executes tool calls and feeds their results back to the model")
         let displayEvents = [AIChatMessage(role: .user, content: "question"), AIChatMessage(role: .tool, content: "private tool event"), AIChatMessage(role: .assistant, content: "", reasoning: "thinking"), AIChatMessage(role: .assistant, content: "answer")]
         let requestEvents = AIChatRequestBuilder.messages(instruction: nil, paperContext: nil, conversation: displayEvents)
         try check(requestEvents.map(\.role) == [.user, .assistant], "display-only tool and thinking events must not become fake model turns")
@@ -297,6 +305,123 @@ enum PDFlightAIChecks {
             _ = try HarnessModelImport.read(profile: profile, credentials: credentials)
             throw CheckFailure(message: "unsupported protocols must not silently use OpenAI requests")
         } catch HarnessModelImport.ImportError.unsupportedAPI("anthropic-messages") { }
+    }
+
+    private static func streamedToolCallsAreReassembledAcrossProviders() throws {
+        var decoder = OpenAIStreamDecoder()
+        var accumulator = OpenAIStreamAccumulator()
+        let lines = [
+            #"data: {"choices":[{"delta":{"content":"checking ","tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":"}},{"index":1,"id":"call_b","function":{"name":"grep","arguments":"{\"pattern\":"}}]}}]}"#,
+            #"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"needle\"}"}},{"index":0,"function":{"arguments":"\"paper.txt\"}"}}]}}]}"#
+        ]
+        for line in lines { if let event = try decoder.decode(line: line) { _ = accumulator.consume(event) } }
+        try check(accumulator.content == "checking " && accumulator.toolCalls == [
+            .init(id: "call_a", name: "read", arguments: #"{"path":"paper.txt"}"#),
+            .init(id: "call_b", name: "grep", arguments: #"{"pattern":"needle"}"#)
+        ], "interleaved OpenAI tool calls and simultaneous text must survive")
+        var responses = OpenAIStreamDecoder(api: "openai-responses")
+        var responseResult = OpenAIStreamAccumulator()
+        for line in [
+            #"data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","call_id":"response_1","name":"read","arguments":""}}"#,
+            #"data: {"type":"response.function_call_arguments.delta","output_index":2,"delta":"{\"page\":2}"}"#,
+            #"data: {"type":"response.function_call_arguments.done","output_index":2,"arguments":"{\"page\":2}"}"#
+        ] { if let event = try responses.decode(line: line) { _ = responseResult.consume(event) } }
+        try check(responseResult.toolCalls == [.init(id: "response_1", name: "read", arguments: #"{"page":2}"#)], "Responses tool call must not duplicate final arguments")
+        var anthropic = OpenAIStreamDecoder(api: "anthropic-messages")
+        var anthropicResult = OpenAIStreamAccumulator()
+        for line in [
+            #"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"grep","input":{}}}"#,
+            #"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"x\"}"}}"#
+        ] { if let event = try anthropic.decode(line: line) { _ = anthropicResult.consume(event) } }
+        try check(anthropicResult.toolCalls == [.init(id: "tool_1", name: "grep", arguments: #"{"q":"x"}"#)], "Anthropic tool-use blocks must preserve arguments")
+    }
+
+    private static func nativeAgentRunsToolRoundTrips() async throws {
+        let context = AIPaperToolContext(documentURL: URL(fileURLWithPath: "/tmp/paper.pdf"), workspaceURL: URL(fileURLWithPath: "/tmp"), pageCount: 1) { _ in "Evidence from page one" }
+        let model: AIChatAgentRunner.Model = { messages, round in
+            AsyncThrowingStream { continuation in
+                if round == 0 {
+                    continuation.yield(.toolCallDeltas([.init(index: 0, id: "c1", name: "pdf_reading", arguments: #"{"action":"read_page","page":1}"#)], content: nil, reasoning: nil))
+                } else if messages.last?.toolEvent?.result?.contains("Evidence from page one") == true {
+                    continuation.yield(.contentDelta("Grounded answer, page 1"))
+                } else { continuation.finish(throwing: CheckFailure(message: "tool result was not returned to model")); return }
+                continuation.yield(.finished); continuation.finish()
+            }
+        }
+        let stream = AIChatAgentRunner.run(messages: [AIChatMessage(role: .user, content: "Read the paper")], model: model) { call in
+            await AIPaperToolRuntime.execute(call, context: context)
+        }
+        var assistant: [AIChatMessage] = []; var results: [AIChatMessage] = []; var started = 0
+        for try await event in stream {
+            switch event {
+            case .assistantCompleted(let message): assistant.append(message)
+            case .toolStarted: started += 1
+            case .toolCompleted(let message): results.append(message)
+            case .modelDelta: break
+            }
+        }
+        try check(started == 1 && assistant.count == 2 && assistant[0].toolCalls?.first?.id == "c1", "agent must preserve the model's structured tool call")
+        try check(results.first?.toolEvent?.callID == "c1" && results.first?.toolEvent?.isError == false && assistant.last?.content == "Grounded answer, page 1", "agent must pass the result into the next model round")
+    }
+
+    private static func nativePaperToolsReadAndSearchSafely() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pdflight-tool-check-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "alpha\nneedle line\nomega".write(to: root.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        let context = AIPaperToolContext(documentURL: root.appendingPathComponent("paper.pdf"), workspaceURL: root, pageCount: 2) { page in
+            page == 0 ? "introduction" : "key method on page two"
+        }
+        func call(_ name: String, _ arguments: String) async -> AIChatToolResult {
+            await AIPaperToolRuntime.execute(.init(id: "test", name: name, arguments: arguments), context: context)
+        }
+        let page = await call("pdf_reading", #"{"action":"read_page","page":2}"#)
+        try check(!page.isError && page.content.contains("第 2 页") && page.content.contains("key method"), "PDF tool must use the real page callback and preserve page numbering")
+        let search = await call("pdf_reading", #"{"action":"search","pattern":"method"}"#)
+        try check(!search.isError && search.content.contains("第 2 页"), "PDF search must identify matching pages")
+        let read = await call("read", #"{"file_path":"notes.txt","offset":2,"limit":1}"#)
+        try check(!read.isError && read.content == "2: needle line", "read must respect line range")
+        let grep = await call("grep", #"{"pattern":"needle","path":"."}"#)
+        try check(!grep.isError && grep.content.contains("notes.txt:2: needle line"), "grep must find text in the workspace")
+        let traversal = await call("read", #"{"file_path":"../outside.txt"}"#)
+        try check(traversal.isError, "workspace tools must reject directory traversal")
+        let invalid = await call("read", "not JSON")
+        try check(invalid.isError, "invalid tool arguments must return an error result")
+    }
+
+    private static func toolRequestsPreserveProviderProtocol() throws {
+        let definition = AIChatToolDefinition(name: "read", description: "Read a page", parameters: .object([
+            "type": .string("object"), "properties": .object(["page": .object(["type": .string("integer")])]), "required": .array([.string("page")])
+        ]))
+        let call = AIChatToolCall(id: "call_1", name: "read", arguments: #"{"page":2}"#)
+        let exchange = [AIChatMessage(role: .user, content: "read page 2"),
+                        AIChatMessage(role: .assistant, content: "", toolCalls: [call]),
+                        AIChatMessage(role: .tool, content: "", toolEvent: .init(name: "read", arguments: call.arguments, result: "page content", callID: call.id))]
+        let preserved = AIChatRequestBuilder.messages(instruction: nil, paperContext: nil, conversation: exchange)
+        try check(preserved.count == 3, "structured tool exchanges must survive request preparation")
+        let repaired = AIChatRequestBuilder.messages(instruction: nil, paperContext: nil, conversation: Array(exchange.prefix(2)))
+        try check(repaired.count == 3 && repaired.last?.toolEvent?.callID == call.id && repaired.last?.toolEvent?.isError == true, "interrupted tool calls must have a matching error result when resumed")
+        let orphan = AIChatRequestBuilder.messages(instruction: nil, paperContext: nil, conversation: [exchange[2]])
+        try check(orphan.isEmpty, "orphaned results must not become invalid provider turns")
+        let client = OpenAICompatibleClient()
+        func body(_ api: String) throws -> [String: Any] {
+            let request = try client.makeRequest(messages: preserved, configuration: .init(baseURL: "http://127.0.0.1:3425/v1", model: "mock", api: api), apiKey: "", tools: [definition])
+            return try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+        }
+        let chat = try body("openai-completions")
+        let chatTurns = chat["messages"] as! [[String: Any]]
+        try check((chat["tools"] as? [[String: Any]])?.first?["type"] as? String == "function", "chat tools must use function envelopes")
+        try check((chatTurns[1]["tool_calls"] as? [[String: Any]])?.first?["id"] as? String == call.id && chatTurns[2]["tool_call_id"] as? String == call.id, "chat tool call and result IDs must match")
+        let responses = try body("openai-responses")
+        let responseTurns = responses["input"] as! [[String: Any]]
+        try check(responseTurns[1]["type"] as? String == "function_call" && responseTurns[2]["type"] as? String == "function_call_output" && responseTurns[2]["call_id"] as? String == call.id, "Responses tool calls must use input items")
+        let anthropic = try body("anthropic-messages")
+        let anthropicTurns = anthropic["messages"] as! [[String: Any]]
+        let use = (anthropicTurns[1]["content"] as? [[String: Any]])?.first
+        let result = (anthropicTurns[2]["content"] as? [[String: Any]])?.first
+        try check(use?["type"] as? String == "tool_use" && result?["type"] as? String == "tool_result" && result?["tool_use_id"] as? String == call.id, "Anthropic tool-use blocks must preserve matching IDs")
+        let restored = try JSONDecoder().decode(AIChatMessage.self, from: JSONEncoder().encode(exchange[1]))
+        try check(restored == exchange[1], "tool-call messages must survive history serialization")
     }
 
     private static func alternateModelProtocolsEncodeAndStream() throws {

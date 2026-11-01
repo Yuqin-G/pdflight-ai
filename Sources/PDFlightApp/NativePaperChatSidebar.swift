@@ -326,6 +326,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     func updateMessage(id: String, content: String, renderMarkdown: Bool = false) { messageContents[id] = content; messages[id]?.setContent(content, renderMarkdown: renderMarkdown) }
     func updateReasoning(id: String, content: String) { reasoningViews[id]?.stringValue = content; reasoningButtons[id]?.isHidden = content.isEmpty }
+    func updateToolEvent(id: String, event: AIChatToolEvent) {
+        reasoningViews[id]?.stringValue = "输入\n" + event.arguments + (event.result.map { "\n\n结果\n" + $0 } ?? "")
+        reasoningButtons[id]?.title = (reasoningViews[id]?.isHidden == false ? "▾" : "▸") + " 工具 · " + event.name + (event.isError ? "（失败）" : "")
+    }
+    func setToolActivity(_ name: String) { statusLabel.stringValue = "正在调用 \(name)…" }
     private func bubbleWidth(for text: String, hasImages: Bool) -> CGFloat {
         let font = NSFont.systemFont(ofSize: 14 * chatZoom)
         let widest = text.components(separatedBy: "\n").map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0

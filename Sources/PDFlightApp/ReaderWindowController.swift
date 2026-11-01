@@ -1750,12 +1750,27 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiTask = Task(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             var accumulator = OpenAIStreamAccumulator()
+            var currentPlaceholderID = placeholder.id
+            var placeholderCommitted = false
+            var pendingCalls: [AIChatToolCall] = []
+            var toolCardIDs: [String: String] = [:]
             var reportedThinking = false
             var reportedAnswering = false
             var lastRenderedAt: TimeInterval = 0
             var lastReasoningRenderedAt: TimeInterval = 0
+            @MainActor func finishPendingTools(_ reason: String) {
+                for call in pendingCalls {
+                    let event = AIChatToolEvent(name: call.name, arguments: call.arguments, result: reason, isError: true, callID: call.id)
+                    let cardID = toolCardIDs[call.id] ?? UUID().uuidString
+                    if toolCardIDs[call.id] == nil {
+                        aiSidebar.append(AIChatMessage(id: cardID, role: .tool, content: "", toolEvent: event))
+                    } else { aiSidebar.updateToolEvent(id: cardID, event: event) }
+                    aiMessages.append(AIChatMessage(id: cardID, role: .tool, content: "", toolEvent: event))
+                }
+                if !pendingCalls.isEmpty { pendingCalls.removeAll(); persistAIHistory() }
+            }
             defer {
-                if activeAIPlaceholderID == placeholder.id {
+                if activeAIPlaceholderID == currentPlaceholderID {
                     activeAIPlaceholderID = nil
                 }
                 aiSidebar.setStreaming(false)
@@ -1764,7 +1779,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             }
             do {
                 let requestMessages = AIChatRequestBuilder.messages(
-                    instruction: "你是论文阅读助手。依据提供的论文与选文回答；默认使用中文，关键结论注明页码。区分原文与推断，缺少证据时直说，不编造。",
+                    instruction: "你是论文阅读助手。依据提供的论文与选文回答；默认使用中文，关键结论注明页码。区分原文与推断，缺少证据时直说，不编造。需要查阅论文时可使用 pdf_reading；需要查阅当前论文工作目录中的文本时可使用 read 或 grep。",
                     paperContext: nil,
                     conversation: recentAIConversation()
                 )
@@ -1786,14 +1801,20 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                         "Local web bridge did not start on \(configuration.baseURL). See uwa-lite.log in Application Support."
                     )
                 }
-                let stream = aiClient.streamChat(
-                    messages: requestMessages,
-                    configuration: configuration,
-                    apiKey: apiKey,
-                    conversationKey: conversationKey,
-                    conversationTitle: conversationTitle,
-                    currentPDFURL: includeCurrentPDF ? documentURL : nil
-                )
+                let client = aiClient
+                let document = documentURL
+                let documentEngine = engine
+                let context = AIPaperToolContext(documentURL: document, workspaceURL: document.deletingLastPathComponent(), pageCount: pageCount) { page in
+                    try await documentEngine.text(on: page).plainText
+                }
+                let stream = AIChatAgentRunner.run(messages: requestMessages) { messages, round in
+                    let needsPDF = includeCurrentPDF && (round == 0 || conversationKey == nil)
+                    return client.streamChat(messages: messages, configuration: configuration, apiKey: apiKey,
+                        conversationKey: conversationKey, conversationTitle: conversationTitle,
+                        currentPDFURL: needsPDF ? document : nil, tools: AIPaperToolRuntime.definitions)
+                } execute: { call in
+                    await AIPaperToolRuntime.execute(call, context: context)
+                }
                 aiSidebar.setActivity(includeCurrentPDF ? .uploading : .waiting, detail: configuration.model)
                 aiSidebar.setMessageActivity(
                     id: placeholder.id,
@@ -1805,78 +1826,76 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     guard conversationGeneration == aiConversationGeneration else {
                         throw CancellationError()
                     }
-                    switch accumulator.consume(event) {
-                    case .thinking where !reportedThinking:
-                        reportedThinking = true
-                        aiSidebar.setActivity(.thinking, detail: configuration.model)
-                        aiSidebar.setMessageActivity(
-                            id: placeholder.id,
-                            phase: .thinking,
-                            identity: providerIdentity
-                        )
-                    case .answering where !reportedAnswering:
-                        reportedAnswering = true
-                        aiSidebar.setActivity(.answering, detail: configuration.model)
-                        aiSidebar.setMessageActivity(
-                            id: placeholder.id,
-                            phase: .answering,
-                            identity: providerIdentity
-                        )
-                    case .thinking, .answering, .finished:
-                        break
-                    }
-                    if case .contentDelta = event, ProcessInfo.processInfo.systemUptime - lastRenderedAt >= 0.08 {
-                        aiSidebar.updateMessage(id: placeholder.id, content: accumulator.content, renderMarkdown: true)
-                        lastRenderedAt = ProcessInfo.processInfo.systemUptime
-                    }
-                    if case .reasoningDelta = event, ProcessInfo.processInfo.systemUptime - lastReasoningRenderedAt >= 0.08 {
-                        aiSidebar.updateReasoning(id: placeholder.id, content: accumulator.reasoning)
-                        lastReasoningRenderedAt = ProcessInfo.processInfo.systemUptime
+                    switch event {
+                    case .modelDelta(let delta):
+                        switch accumulator.consume(delta) {
+                        case .thinking where !reportedThinking:
+                            reportedThinking = true; aiSidebar.setActivity(.thinking, detail: configuration.model)
+                        case .answering where !reportedAnswering:
+                            reportedAnswering = true; aiSidebar.setActivity(.answering, detail: configuration.model)
+                        case .thinking, .answering, .toolCalling, .finished: break
+                        }
+                        if !accumulator.content.isEmpty, ProcessInfo.processInfo.systemUptime - lastRenderedAt >= 0.08 {
+                            aiSidebar.updateMessage(id: currentPlaceholderID, content: accumulator.content, renderMarkdown: true)
+                            lastRenderedAt = ProcessInfo.processInfo.systemUptime
+                        }
+                        if !accumulator.reasoning.isEmpty, ProcessInfo.processInfo.systemUptime - lastReasoningRenderedAt >= 0.08 {
+                            aiSidebar.updateReasoning(id: currentPlaceholderID, content: accumulator.reasoning)
+                            lastReasoningRenderedAt = ProcessInfo.processInfo.systemUptime
+                        }
+                    case .assistantCompleted(let result):
+                        let saved = AIChatMessage(id: currentPlaceholderID, role: .assistant, content: result.content,
+                            createdAt: result.createdAt, reasoning: result.reasoning, toolCalls: result.toolCalls)
+                        aiMessages.append(saved); placeholderCommitted = true
+                        aiSidebar.updateMessage(id: currentPlaceholderID, content: saved.content, renderMarkdown: true)
+                        aiSidebar.updateReasoning(id: currentPlaceholderID, content: saved.reasoning ?? "")
+                        pendingCalls = saved.toolCalls ?? []
+                        persistAIHistory()
+                    case .toolStarted(let call):
+                        let cardID = UUID().uuidString; toolCardIDs[call.id] = cardID
+                        aiSidebar.append(AIChatMessage(id: cardID, role: .tool, content: "", toolEvent: .init(name: call.name, arguments: call.arguments, callID: call.id)))
+                        aiSidebar.setToolActivity(call.name)
+                    case .toolCompleted(let result):
+                        guard let event = result.toolEvent, let callID = event.callID else { continue }
+                        let cardID = toolCardIDs[callID] ?? result.id
+                        aiSidebar.updateToolEvent(id: cardID, event: event)
+                        aiMessages.append(AIChatMessage(id: cardID, role: .tool, content: "", createdAt: result.createdAt, toolEvent: event))
+                        pendingCalls.removeAll { $0.id == callID }
+                        persistAIHistory()
+                        if pendingCalls.isEmpty {
+                            let next = AIChatMessage(role: .assistant, content: "")
+                            currentPlaceholderID = next.id; activeAIPlaceholderID = next.id; placeholderCommitted = false
+                            accumulator = OpenAIStreamAccumulator(); reportedThinking = false; reportedAnswering = false
+                            lastRenderedAt = 0; lastReasoningRenderedAt = 0
+                            aiSidebar.append(next); aiSidebar.setActivity(.waiting, detail: configuration.model)
+                        }
                     }
                 }
-                let finalContent = try accumulator.finalAnswer()
-                aiSidebar.updateReasoning(id: placeholder.id, content: accumulator.reasoning)
-                guard conversationGeneration == aiConversationGeneration else {
-                    throw CancellationError()
-                }
-
-                let assistantMessage = AIChatMessage(
-                    id: placeholder.id,
-                    role: .assistant,
-                    content: finalContent,
-                    reasoning: accumulator.reasoning.isEmpty ? nil : accumulator.reasoning
-                )
-                aiMessages.append(assistantMessage)
-                aiSidebar.updateMessage(
-                    id: placeholder.id,
-                    content: finalContent,
-                    renderMarkdown: true
-                )
-                persistAIHistory()
                 let promptName = promptTemplate.instruction(title: paperTitle) == nil
                     ? ""
                     : " · \(promptTemplate.name)"
                 aiSidebar.setActivity(.completed, detail: "\(configuration.model)\(promptName)")
                 aiSidebar.setMessageActivity(
-                    id: placeholder.id,
+                    id: currentPlaceholderID,
                     phase: .completed,
                     identity: providerIdentity
                 )
             } catch is CancellationError {
                 guard conversationGeneration == aiConversationGeneration else { return }
+                finishPendingTools("工具调用已停止。")
                 let partialContent = accumulator.content
-                if partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && accumulator.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    aiSidebar.removeMessage(id: placeholder.id)
-                } else {
+                if !placeholderCommitted && partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && accumulator.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    aiSidebar.removeMessage(id: currentPlaceholderID)
+                } else if !placeholderCommitted {
                     let assistantMessage = AIChatMessage(
-                        id: placeholder.id,
+                        id: currentPlaceholderID,
                         role: .assistant,
                         content: partialContent,
                         reasoning: accumulator.reasoning.isEmpty ? nil : accumulator.reasoning
                     )
                     aiMessages.append(assistantMessage)
                     aiSidebar.updateMessage(
-                        id: placeholder.id,
+                        id: currentPlaceholderID,
                         content: partialContent,
                         renderMarkdown: true
                     )
@@ -1884,27 +1903,29 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 }
                 aiSidebar.setActivity(.stopped, detail: "Generation stopped")
                 aiSidebar.setMessageActivity(
-                    id: placeholder.id,
+                    id: currentPlaceholderID,
                     phase: .stopped,
                     identity: providerIdentity
                 )
             } catch {
+                guard conversationGeneration == aiConversationGeneration else { return }
+                finishPendingTools("工具调用未完成：\(error.localizedDescription)")
                 let partialContent = accumulator.content
-                if partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && accumulator.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if !placeholderCommitted && partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && accumulator.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     aiSidebar.updateMessage(
-                        id: placeholder.id,
+                        id: currentPlaceholderID,
                         content: "Request failed: \(error.localizedDescription)"
                     )
-                } else {
+                } else if !placeholderCommitted {
                     let assistantMessage = AIChatMessage(
-                        id: placeholder.id,
+                        id: currentPlaceholderID,
                         role: .assistant,
                         content: partialContent,
                         reasoning: accumulator.reasoning.isEmpty ? nil : accumulator.reasoning
                     )
                     aiMessages.append(assistantMessage)
                     aiSidebar.updateMessage(
-                        id: placeholder.id,
+                        id: currentPlaceholderID,
                         content: partialContent,
                         renderMarkdown: true
                     )
@@ -1912,7 +1933,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 }
                 aiSidebar.setActivity(.failed, detail: error.localizedDescription)
                 aiSidebar.setMessageActivity(
-                    id: placeholder.id,
+                    id: currentPlaceholderID,
                     phase: .failed,
                     identity: providerIdentity
                 )
@@ -1926,20 +1947,28 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     ) -> [AIChatMessage] {
         var result: [AIChatMessage] = []
         var remaining = maximumCharacters
-        for message in aiMessages.filter({ $0.role == .user || ($0.role == .assistant && !$0.content.isEmpty) }).suffix(maximumMessages).reversed() {
+        let eligible = aiMessages.filter { message in
+            message.role == .user || (message.role == .assistant && (!message.content.isEmpty || !(message.toolCalls ?? []).isEmpty))
+                || (message.role == .tool && !(message.toolEvent?.callID ?? "").isEmpty)
+        }
+        for message in eligible.suffix(maximumMessages).reversed() {
             guard remaining > 0 else { break }
-            if message.content.count <= remaining {
+            let cost = message.content.count + (message.toolEvent?.result?.count ?? 0)
+                + (message.toolCalls ?? []).reduce(0) { $0 + $1.arguments.count }
+            if cost <= remaining {
                 result.append(message)
-                remaining -= message.content.count
-            } else if result.isEmpty {
+                remaining -= cost
+            } else if result.isEmpty && message.role != .tool && (message.toolCalls ?? []).isEmpty {
                 result.append(AIChatMessage(
                     id: message.id,
                     role: message.role,
                     content: String(message.content.suffix(remaining)),
-                    createdAt: message.createdAt
+                    imageAttachments: message.imageAttachments,
+                    createdAt: message.createdAt,
+                    pdfAttachmentName: message.pdfAttachmentName
                 ))
                 remaining = 0
-            }
+            } else { break }
         }
         return result.reversed()
     }

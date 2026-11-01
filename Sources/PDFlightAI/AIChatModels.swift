@@ -12,8 +12,9 @@ public struct AIChatToolEvent: Codable, Sendable, Equatable {
     public var arguments: String
     public var result: String?
     public var isError: Bool
-    public init(name: String, arguments: String, result: String? = nil, isError: Bool = false) {
-        self.name = name; self.arguments = arguments; self.result = result; self.isError = isError
+    public var callID: String?
+    public init(name: String, arguments: String, result: String? = nil, isError: Bool = false, callID: String? = nil) {
+        self.name = name; self.arguments = arguments; self.result = result; self.isError = isError; self.callID = callID
     }
 }
 
@@ -100,6 +101,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
     public var pdfAttachmentName: String?
     public var reasoning: String?
     public var toolEvent: AIChatToolEvent?
+    public var toolCalls: [AIChatToolCall]?
     public let createdAt: Date
 
     public init(
@@ -110,7 +112,8 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         createdAt: Date = Date(),
         reasoning: String? = nil,
         toolEvent: AIChatToolEvent? = nil,
-        pdfAttachmentName: String? = nil
+        pdfAttachmentName: String? = nil,
+        toolCalls: [AIChatToolCall]? = nil
     ) {
         self.id = id
         self.role = role
@@ -120,10 +123,11 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.reasoning = reasoning
         self.toolEvent = toolEvent
+        self.toolCalls = toolCalls
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName
+        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName, toolCalls
     }
 
     public init(from decoder: Decoder) throws {
@@ -139,6 +143,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
         toolEvent = try container.decodeIfPresent(AIChatToolEvent.self, forKey: .toolEvent)
+        toolCalls = try container.decodeIfPresent([AIChatToolCall].self, forKey: .toolCalls)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -153,6 +158,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(reasoning, forKey: .reasoning)
         try container.encodeIfPresent(toolEvent, forKey: .toolEvent)
+        try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
     }
 }
 

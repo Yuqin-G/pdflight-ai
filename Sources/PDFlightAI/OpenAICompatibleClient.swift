@@ -9,7 +9,8 @@ public struct OpenAICompatibleClient: Sendable {
         apiKey: String,
         conversationKey: String? = nil,
         conversationTitle: String? = nil,
-        currentPDFURL: URL? = nil
+        currentPDFURL: URL? = nil,
+        tools: [AIChatToolDefinition] = []
     ) -> AsyncThrowingStream<OpenAIStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -20,7 +21,8 @@ public struct OpenAICompatibleClient: Sendable {
                         apiKey: apiKey,
                         conversationKey: conversationKey,
                         conversationTitle: conversationTitle,
-                        currentPDFURL: currentPDFURL
+                        currentPDFURL: currentPDFURL,
+                        tools: tools
                     )
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else {
@@ -44,7 +46,7 @@ public struct OpenAICompatibleClient: Sendable {
                         try Task.checkCancellation()
                         guard let event = try decoder.decode(line: line) else { continue }
                         switch event {
-                        case .contentDelta, .reasoningDelta:
+                        case .contentDelta, .reasoningDelta, .toolCallDeltas:
                             continuation.yield(event)
                         case .finished:
                             continuation.finish()
@@ -68,14 +70,15 @@ public struct OpenAICompatibleClient: Sendable {
         apiKey: String,
         conversationKey: String? = nil,
         conversationTitle: String? = nil,
-        currentPDFURL: URL? = nil
+        currentPDFURL: URL? = nil,
+        tools: [AIChatToolDefinition] = []
     ) throws -> URLRequest {
         let model = configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
             throw OpenAICompatibleError.invalidConfiguration("Enter a model in AI Settings.")
         }
         if configuration.api != "openai-completions" {
-            return try makeAlternateRequest(messages: messages, configuration: configuration, apiKey: apiKey, currentPDFURL: currentPDFURL)
+            return try makeAlternateRequest(messages: messages, configuration: configuration, apiKey: apiKey, currentPDFURL: currentPDFURL, tools: tools)
         }
         let endpoint = try endpointURL(from: configuration.baseURL)
         if currentPDFURL != nil {
@@ -101,6 +104,7 @@ public struct OpenAICompatibleClient: Sendable {
             stream: true,
             reasoningEffort: configuration.reasoningEffort,
             maxTokens: configuration.maxTokens.flatMap { $0 > 0 ? $0 : nil },
+            tools: tools.isEmpty ? nil : tools.map { RequestTool(function: $0) },
             conversationKey: conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines),
             conversationTitle: conversationTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
             pdfAttachments: currentPDFURL.map {
@@ -114,7 +118,7 @@ public struct OpenAICompatibleClient: Sendable {
         return request
     }
 
-    private func makeAlternateRequest(messages: [AIChatMessage], configuration: AIProviderConfiguration, apiKey: String, currentPDFURL: URL?) throws -> URLRequest {
+    private func makeAlternateRequest(messages: [AIChatMessage], configuration: AIProviderConfiguration, apiKey: String, currentPDFURL: URL?, tools: [AIChatToolDefinition]) throws -> URLRequest {
         guard ["openai-responses", "anthropic-messages"].contains(configuration.api) else {
             throw OpenAICompatibleError.invalidConfiguration("Unsupported model API: \(configuration.api)")
         }
@@ -142,10 +146,31 @@ public struct OpenAICompatibleClient: Sendable {
         guard pdfData == nil || lastUserID != nil else {
             throw OpenAICompatibleError.invalidConfiguration("PDF 附件需要一条用户消息。")
         }
+        let encodedTools = try tools.map { tool -> [String: Any] in
+            let parameters = try JSONSerialization.jsonObject(with: JSONEncoder().encode(tool.parameters), options: [.fragmentsAllowed])
+            if configuration.api == "anthropic-messages" {
+                return ["name": tool.name, "description": tool.description, "input_schema": parameters]
+            }
+            return ["type": "function", "name": tool.name, "description": tool.description, "parameters": parameters]
+        }
         if configuration.api == "anthropic-messages" {
             if !key.isEmpty { request.setValue(key, forHTTPHeaderField: "x-api-key") }
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-            let turns: [[String: Any]] = messages.filter { $0.role != .system }.map { message in
+            var turns: [[String: Any]] = []
+            var previousWasToolResult = false
+            for message in messages where message.role != .system {
+                if message.role == .tool {
+                    guard let event = message.toolEvent, let id = event.callID, !id.isEmpty else {
+                        throw OpenAICompatibleError.invalidConfiguration("A tool result is missing its call ID.")
+                    }
+                    let result: [String: Any] = ["type": "tool_result", "tool_use_id": id, "content": event.result ?? message.content, "is_error": event.isError]
+                    if previousWasToolResult, var content = turns.last?["content"] as? [[String: Any]] {
+                        content.append(result); turns[turns.count - 1]["content"] = content
+                    } else { turns.append(["role": "user", "content": [result]]) }
+                    previousWasToolResult = true
+                    continue
+                }
+                previousWasToolResult = false
                 var content: [[String: Any]] = []
                 if !message.content.isEmpty { content.append(["type": "text", "text": message.content]) }
                 for image in message.imageAttachments {
@@ -154,27 +179,44 @@ public struct OpenAICompatibleClient: Sendable {
                 if message.id == lastUserID, let pdfData {
                     content.append(["type": "document", "source": ["type": "base64", "media_type": "application/pdf", "data": pdfData.base64EncodedString()]])
                 }
-                return ["role": message.role.rawValue, "content": content]
+                for call in message.toolCalls ?? [] {
+                    let input = (try? JSONSerialization.jsonObject(with: Data(call.arguments.utf8))) as? [String: Any] ?? [:]
+                    content.append(["type": "tool_use", "id": call.id, "name": call.name, "input": input])
+                }
+                turns.append(["role": message.role.rawValue, "content": content])
             }
             let system = messages.filter { $0.role == .system }.map(\.content).joined(separator: "\n\n")
             var body: [String: Any] = ["model": configuration.model, "max_tokens": max(1, configuration.maxTokens ?? 4096), "stream": true, "system": system, "messages": turns]
+            if !encodedTools.isEmpty { body["tools"] = encodedTools }
             if let effort = configuration.reasoningEffort, effort != "off" { body["output_config"] = ["effort": effort] }
             if configuration.forceAdaptiveThinking == true { body["thinking"] = ["type": "adaptive"] }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         } else {
             if !key.isEmpty { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
-            let input: [[String: Any]] = messages.map { message in
+            let input: [[String: Any]] = try messages.flatMap { message -> [[String: Any]] in
+                if message.role == .tool {
+                    guard let event = message.toolEvent, let id = event.callID, !id.isEmpty else {
+                        throw OpenAICompatibleError.invalidConfiguration("A tool result is missing its call ID.")
+                    }
+                    return [["type": "function_call_output", "call_id": id, "output": event.result ?? message.content]]
+                }
+                if let calls = message.toolCalls, !calls.isEmpty {
+                    var entries: [[String: Any]] = message.content.isEmpty ? [] : [["role": message.role.rawValue, "content": message.content]]
+                    entries.append(contentsOf: calls.map { ["type": "function_call", "call_id": $0.id, "name": $0.name, "arguments": $0.arguments] })
+                    return entries
+                }
                 let includesPDF = message.id == lastUserID && pdfData != nil
-                guard !message.imageAttachments.isEmpty || includesPDF else { return ["role": message.role.rawValue, "content": message.content] }
+                guard !message.imageAttachments.isEmpty || includesPDF else { return [["role": message.role.rawValue, "content": message.content]] }
                 var content: [[String: Any]] = []
                 if !message.content.isEmpty { content.append(["type": "input_text", "text": message.content]) }
                 for image in message.imageAttachments { content.append(["type": "input_image", "image_url": "data:\(image.mimeType);base64,\(image.data.base64EncodedString())"]) }
                 if includesPDF, let pdfData, let currentPDFURL {
                     content.append(["type": "input_file", "filename": currentPDFURL.lastPathComponent, "file_data": "data:application/pdf;base64,\(pdfData.base64EncodedString())"])
                 }
-                return ["role": message.role.rawValue, "content": content]
+                return [["role": message.role.rawValue, "content": content]]
             }
             var body: [String: Any] = ["model": configuration.model, "stream": true, "input": input]
+            if !encodedTools.isEmpty { body["tools"] = encodedTools }
             if let maxTokens = configuration.maxTokens, maxTokens > 0 { body["max_output_tokens"] = maxTokens }
             if let effort = configuration.reasoningEffort, effort != "off" { body["reasoning"] = ["effort": effort] }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -223,6 +265,7 @@ private struct RequestBody: Encodable {
     let stream: Bool
     let reasoningEffort: String?
     let maxTokens: Int?
+    let tools: [RequestTool]?
     let conversationKey: String?
     let conversationTitle: String?
     let pdfAttachments: [RequestPDFAttachment]?
@@ -233,9 +276,25 @@ private struct RequestBody: Encodable {
         case stream
         case reasoningEffort = "reasoning_effort"
         case maxTokens = "max_tokens"
+        case tools
         case conversationKey = "conversation_key"
         case conversationTitle = "conversation_title"
         case pdfAttachments = "pdf_attachments"
+    }
+}
+
+private struct RequestTool: Encodable {
+    let type = "function"
+    let function: AIChatToolDefinition
+}
+
+private struct RequestToolCall: Encodable {
+    struct Function: Encodable { let name: String; let arguments: String }
+    let id: String
+    let type = "function"
+    let function: Function
+    init(_ call: AIChatToolCall) {
+        id = call.id; function = Function(name: call.name, arguments: call.arguments)
     }
 }
 
@@ -261,11 +320,22 @@ private struct RequestMessage: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case role, content
+        case toolCalls = "tool_calls"
+        case toolCallID = "tool_call_id"
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(role, forKey: .role)
+        if let calls = message.toolCalls, !calls.isEmpty { try container.encode(calls.map(RequestToolCall.init), forKey: .toolCalls) }
+        if message.role == .tool {
+            guard let id = message.toolEvent?.callID, !id.isEmpty else {
+                throw OpenAICompatibleError.invalidConfiguration("A tool result is missing its call ID.")
+            }
+            try container.encode(id, forKey: .toolCallID)
+            try container.encode(message.toolEvent?.result ?? message.content, forKey: .content)
+            return
+        }
         guard !message.imageAttachments.isEmpty else {
             try container.encode(message.content, forKey: .content)
             return

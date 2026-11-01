@@ -46,7 +46,30 @@ public enum AIChatRequestBuilder {
            !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result.append(AIChatMessage(role: .system, content: instruction))
         }
-        result.append(contentsOf: conversation.filter { $0.role != .tool && !($0.role == .assistant && $0.content.isEmpty) })
+        let visible = conversation.filter { message in
+            if message.role == .tool { return !(message.toolEvent?.callID ?? "").isEmpty }
+            if message.role == .assistant && message.content.isEmpty { return !(message.toolCalls ?? []).isEmpty }
+            return true
+        }
+        var pending: [AIChatToolCall] = []
+        func finishInterruptedCalls() {
+            for call in pending {
+                result.append(AIChatMessage(role: .tool, content: "", toolEvent: .init(name: call.name, arguments: call.arguments,
+                    result: "工具调用中断，未返回结果。", isError: true, callID: call.id)))
+            }
+            pending.removeAll()
+        }
+        for message in visible {
+            if message.role == .tool {
+                guard let id = message.toolEvent?.callID, pending.contains(where: { $0.id == id }) else { continue }
+                result.append(message); pending.removeAll { $0.id == id }
+            } else {
+                finishInterruptedCalls()
+                result.append(message)
+                pending = message.toolCalls ?? []
+            }
+        }
+        finishInterruptedCalls()
         return result
     }
 }
