@@ -2158,11 +2158,23 @@ final class AIChatRenderedContentView: NSStackView {
                 if harnessTypography, offset < items.count - 1, let last = arrangedSubviews.last { setCustomSpacing(6 * bodyFontSize / 14, after: last) }
             }
         case let .blockquote(text):
-            addRichContent(
-                "▍  \(text)",
-                color: .secondaryLabelColor,
-                paragraphSpacing: 6
-            )
+            if harnessTypography {
+                let quote = AIChatRenderedContentView()
+                quote.alignment = .width; quote.translatesAutoresizingMaskIntoConstraints = false
+                quote.useHarnessTypography(); quote.setFontSize(bodyFontSize); quote.setContent(text, renderMarkdown: true)
+                let line = NSView(); line.wantsLayer = true; line.layer?.backgroundColor = NativeHarnessStyle.caption.cgColor
+                line.translatesAutoresizingMaskIntoConstraints = false
+                let container = NSStackView(views: [line, quote]); container.orientation = .horizontal
+                container.alignment = .top; container.spacing = 14 * bodyFontSize / 14
+                container.translatesAutoresizingMaskIntoConstraints = false; addArrangedSubview(container)
+                NSLayoutConstraint.activate([
+                    container.widthAnchor.constraint(equalTo: widthAnchor),
+                    line.widthAnchor.constraint(equalToConstant: 2 * bodyFontSize / 14),
+                    line.heightAnchor.constraint(equalTo: quote.heightAnchor)
+                ])
+            } else {
+                addRichContent("▍  \(text)", color: .secondaryLabelColor, paragraphSpacing: 6)
+            }
         case let .code(language, content):
             addCodeBlock(language: language, content: content)
         case let .table(headers, rows):
@@ -2454,7 +2466,11 @@ final class AIChatRenderedContentView: NSStackView {
             var font = isCode
                 ? NSFont.monospacedSystemFont(ofSize: baseSize * 0.90, weight: .regular)
                 : NSFont.systemFont(ofSize: baseSize, weight: isStrong ? .semibold : baseWeight)
-            if isItalic,
+            if isItalic, harnessTypography {
+                // The browser synthesizes italic CJK glyphs even when the
+                // fallback font has no italic face; match that behavior.
+                value.addAttribute(.obliqueness, value: 0.2, range: range)
+            } else if isItalic,
                let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) as NSFont? {
                 font = italic
             }

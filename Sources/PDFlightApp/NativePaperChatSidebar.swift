@@ -165,6 +165,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         presetPopup.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         presetPopup.layer?.borderWidth = 0.5; presetPopup.layer?.borderColor = NSColor.separatorColor.cgColor
         presetPopup.layer?.cornerRadius = 5
+        presetPopup.heightAnchor.constraint(equalToConstant: 26).isActive = true
         applyButton.isBordered = false; applyButton.font = .systemFont(ofSize: 11)
         applyButton.target = self; applyButton.action = #selector(applyPreset)
         recordButton.isBordered = false; recordButton.toolTip = "打开会话记录目录"
@@ -253,7 +254,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private func divider() -> NSView { let view = NSBox(); view.boxType = .separator; return view }
     func setPaperTitle(_ title: String) { toolTip = title }
     func activate() { }
-    func close() { }
+    func close() { modelPanel?.dismiss(); modelPanel = nil }
     func setModelTitle(_ title: String) {
         modelButton.attributedTitle = NSAttributedString(string: title.isEmpty ? "选择模型 ▾" : title + " ▾", attributes: [.font: NSFont.systemFont(ofSize: 13 * chatZoom), .foregroundColor: NativeHarnessStyle.primary])
     }
