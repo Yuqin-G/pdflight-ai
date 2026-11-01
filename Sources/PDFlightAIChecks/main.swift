@@ -2,6 +2,11 @@ import Foundation
 import PDFlightAI
 import PDFlightCore
 
+private struct SlowTestSecretStore: AISecretStore {
+    func loadAPIKey() throws -> String { Thread.sleep(forTimeInterval: 1); return "fixture" }
+    func saveAPIKey(_ apiKey: String) throws { }
+}
+
 @main
 enum PDFlightAIChecks {
     static func main() async throws {
@@ -111,6 +116,8 @@ enum PDFlightAIChecks {
         }
         try await paperContextCarriesPageBoundariesAndStopsAtItsBudget()
         print("PASS: paper context carries page boundaries and respects its budget")
+        try await secretWaitIsCancellable()
+        print("PASS: waiting for a slow keychain is cancellable without blocking the UI")
         try openAIStreamDecoderReadsContentAndCompletion()
         print("PASS: OpenAI stream decoder reads content and completion")
         try openAIStreamDecoderSeparatesReasoningFromFinalContent()
@@ -504,6 +511,19 @@ enum PDFlightAIChecks {
         let aBody = try JSONSerialization.jsonObject(with: anthropicFile.httpBody!) as! [String: Any]
         let turns = aBody["messages"] as! [[String: Any]]; let blocks = turns.last!["content"] as! [[String: Any]]
         try check(blocks.filter { $0["type"] as? String == "document" }.count == 2, "Anthropic must carry both explicitly attached PDFs")
+    }
+
+    @MainActor private static func secretWaitIsCancellable() async throws {
+        let store = AIConfigurationStore(secretStore: SlowTestSecretStore())
+        let started = Date()
+        let task = Task { try await store.apiKeyAsync(for: nil) }
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        do {
+            _ = try await task.value
+            throw CheckFailure(message: "expected keychain wait to be cancelled")
+        } catch is CancellationError { }
+        try check(Date().timeIntervalSince(started) < 0.8, "cancellation must not wait for the keychain")
     }
 
     private static func validateRenderableContentFromStandardInput() throws {

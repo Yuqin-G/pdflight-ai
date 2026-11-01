@@ -143,4 +143,50 @@ public final class AIConfigurationStore {
     public func apiKey(for route: HarnessModelImport.Route) throws -> String {
         try KeychainAISecretStore(service: catalogSecretsService, account: "provider:" + route.provider).loadAPIKey()
     }
+
+    /// Keychain can wait for macOS authorization or an unresponsive security daemon.
+    /// Keep that wait off the UI thread, and allow the caller to stop waiting.
+    public func apiKeyAsync(for route: HarnessModelImport.Route?) async throws -> String {
+        let store: any AISecretStore = route.map {
+            KeychainAISecretStore(service: catalogSecretsService, account: "provider:" + $0.provider)
+        } ?? secretStore
+        return try await AISecretLoad.run { try store.loadAPIKey() }
+    }
+}
+
+private final class AISecretLoad: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String, Error>?
+    private var result: Result<String, Error>?
+
+    static func run(_ operation: @escaping @Sendable () throws -> String) async throws -> String {
+        let state = AISecretLoad()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                state.install(continuation)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    state.finish(Result { try operation() })
+                }
+            }
+        } onCancel: {
+            state.finish(.failure(CancellationError()))
+        }
+    }
+
+    private func install(_ continuation: CheckedContinuation<String, Error>) {
+        lock.lock()
+        if let result { lock.unlock(); continuation.resume(with: result); return }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    private func finish(_ result: Result<String, Error>) {
+        lock.lock()
+        guard self.result == nil else { lock.unlock(); return }
+        self.result = result
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
 }

@@ -1697,20 +1697,6 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             return
         }
 
-        let apiKey: String
-        do {
-            apiKey = try route.map { try aiConfigurationStore.apiKey(for: $0) } ?? aiConfigurationStore.apiKey()
-        } catch {
-            aiSidebar.prefill(
-                question,
-                attachments: attachments,
-                includeCurrentPDF: includeCurrentPDF,
-                additionalPDFPaths: additionalPDFPaths
-            )
-            present(error: error, title: "Could not read AI settings")
-            return
-        }
-
         let promptTemplate = promptTemplate(for: preset)
         guard let displayQuestion = AIChatRequestBuilder.displayQuestion(
             question: question,
@@ -1796,6 +1782,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                 processNextAISubmissionIfNeeded()
             }
             do {
+                let apiKey = try await aiConfigurationStore.apiKeyAsync(for: route)
+                try Task.checkCancellation()
                 let requestMessages = AIChatRequestBuilder.messages(
                     instruction: "你是论文阅读助手。依据提供的论文与选文回答；默认使用中文，关键结论注明页码。区分原文与推断，缺少证据时直说，不编造。需要查阅论文时可使用 pdf_reading；需要查阅当前论文工作目录中的文本时可使用 read 或 grep。",
                     paperContext: nil,
