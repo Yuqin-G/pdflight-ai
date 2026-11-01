@@ -102,6 +102,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
     public var reasoning: String?
     public var toolEvent: AIChatToolEvent?
     public var toolCalls: [AIChatToolCall]?
+    public var feedback: String?
     public let createdAt: Date
 
     public init(
@@ -113,7 +114,8 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         reasoning: String? = nil,
         toolEvent: AIChatToolEvent? = nil,
         pdfAttachmentName: String? = nil,
-        toolCalls: [AIChatToolCall]? = nil
+        toolCalls: [AIChatToolCall]? = nil,
+        feedback: String? = nil
     ) {
         self.id = id
         self.role = role
@@ -124,10 +126,11 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         self.reasoning = reasoning
         self.toolEvent = toolEvent
         self.toolCalls = toolCalls
+        self.feedback = feedback
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName, toolCalls
+        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName, toolCalls, feedback
     }
 
     public init(from decoder: Decoder) throws {
@@ -144,6 +147,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
         toolEvent = try container.decodeIfPresent(AIChatToolEvent.self, forKey: .toolEvent)
         toolCalls = try container.decodeIfPresent([AIChatToolCall].self, forKey: .toolCalls)
+        feedback = try container.decodeIfPresent(String.self, forKey: .feedback)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -159,6 +163,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         try container.encodeIfPresent(reasoning, forKey: .reasoning)
         try container.encodeIfPresent(toolEvent, forKey: .toolEvent)
         try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
+        try container.encodeIfPresent(feedback, forKey: .feedback)
     }
 }
 

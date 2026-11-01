@@ -36,6 +36,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard row?.arrangedSubviews.contains(where: { ($0 as? NSTextField)?.stringValue.contains("paper.pdf") == true }) == true else {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 5, userInfo: [NSLocalizedDescriptionKey: "历史消息必须显示 PDF 附件"])
         }
+        let answer = AIChatMessage(role: .assistant, content: "测试回答")
+        var feedback: String?; sidebar.onFeedback = { id, value in if id == answer.id { feedback = value } }
+        sidebar.append(answer)
+        sidebar.feedbackButtons[answer.id]?.0.performClick(nil)
+        guard feedback == "positive" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "回答反馈必须能切换"]) }
     }
     var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool) -> Void)?
     var onConfigure: (() -> Void)?
@@ -53,6 +58,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     var onSelectModel: ((String) -> Void)?
     var onSelectReasoning: ((String?) -> Void)?
     var onSelectAccessMode: ((AIChatAccessMode) -> Void)?
+    var onFeedback: ((String, String?) -> Void)?
+    var onBranchMessage: ((String) -> Void)?
 
     private let tabs = NSStackView()
     private let tabScroll = NSScrollView()
@@ -84,6 +91,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var reasoningViews: [String: NSTextField] = [:]
     private var reasoningButtons: [String: NSButton] = [:]
     private var assistantFooters: [String: NSView] = [:]
+    private var feedbackButtons: [String: (NSButton, NSButton)] = [:]
     private var attachments: [AIChatImageAttachment] = []
     private var includePDF = false
     private var templates = NativePaperPrompts.templates
@@ -191,6 +199,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         composerScroll.documentView = composer
         attachButton.isBordered = false; attachButton.target = self; attachButton.action = #selector(attach)
         attachButton.toolTip = "添加图片或当前 PDF"
+        attachButton.attributedTitle = NSAttributedString(string: "+", attributes: [.font: NSFont.systemFont(ofSize: 18), .foregroundColor: NativeHarnessStyle.primary])
         attachmentLabel.font = .systemFont(ofSize: 10); attachmentLabel.textColor = .secondaryLabelColor
         modelButton.isBordered = false; modelButton.font = .systemFont(ofSize: 13); modelButton.lineBreakMode = .byTruncatingTail
         modelButton.target = self; modelButton.action = #selector(configureModel)
@@ -198,6 +207,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         accessButton.image = NSImage(systemSymbolName: "exclamationmark.shield", accessibilityDescription: nil); accessButton.imagePosition = .imageLeading
         accessButton.target = self; accessButton.action = #selector(configureAccess)
         sendButton.isBordered = false; sendButton.target = self; sendButton.action = #selector(sendOrStop)
+        updateSendButton()
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let footer = NSStackView(views: [attachButton, accessButton, attachmentLabel, spacer, modelButton, sendButton])
         footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 6
@@ -239,8 +249,14 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     func setPaperTitle(_ title: String) { toolTip = title }
     func activate() { }
     func close() { }
-    func setModelTitle(_ title: String) { modelButton.title = title.isEmpty ? "选择模型 ▾" : title + " ▾" }
-    func setAccessMode(_ mode: AIChatAccessMode) { accessMode = mode; accessButton.title = mode.title + " ▾" }
+    func setModelTitle(_ title: String) {
+        modelButton.attributedTitle = NSAttributedString(string: title.isEmpty ? "选择模型 ▾" : title + " ▾", attributes: [.font: NSFont.systemFont(ofSize: 13 * chatZoom), .foregroundColor: NativeHarnessStyle.primary])
+    }
+    func setAccessMode(_ mode: AIChatAccessMode) {
+        accessMode = mode
+        accessButton.attributedTitle = NSAttributedString(string: mode.title + " ▾", attributes: [.font: NSFont.systemFont(ofSize: 13 * chatZoom), .foregroundColor: NativeHarnessStyle.primary])
+        accessButton.contentTintColor = NativeHarnessStyle.primary
+    }
     private func setChatZoom(_ value: CGFloat) {
         guard value.isFinite else { return }
         chatZoom = min(2.4, max(0.8, value))
@@ -251,7 +267,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         for (id, constraint) in userBubbleWidths {
             constraint.constant = bubbleWidth(for: messageContents[id] ?? "", hasImages: userBubbleHasImages.contains(id))
         }
-        updateComposerTypography(); resizeComposer()
+        updateComposerTypography(); resizeComposer(); setAccessMode(accessMode)
+        if let route = modelRoutes.first(where: { $0.id == currentModelRouteID }) { setModelTitle(route.name) }
     }
     @objc private func resetChatZoom() { setChatZoom(1) }
     func setWebConversationURL(_ value: String?) {
@@ -293,7 +310,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     func install(_ values: [AIChatMessage]) {
         messagesStack.arrangedSubviews.forEach { messagesStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        messages.removeAll(); messageRows.removeAll(); messageContents.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); assistantFooters.removeAll(); values.forEach(append)
+        messages.removeAll(); messageRows.removeAll(); messageContents.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); assistantFooters.removeAll(); feedbackButtons.removeAll(); values.forEach(append)
     }
     func append(_ message: AIChatMessage) {
         let rendered = AIChatRenderedContentView(); rendered.translatesAutoresizingMaskIntoConstraints = false; rendered.alignment = .width
@@ -334,11 +351,23 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         if message.role == .assistant {
             let copy = NSButton(image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "复制回复") ?? NSImage(), target: self, action: #selector(copyMessage(_:)))
             copy.identifier = NSUserInterfaceItemIdentifier(message.id); copy.isBordered = false; copy.contentTintColor = .secondaryLabelColor; copy.toolTip = "复制回复"
+            func feedbackButton(_ symbol: String, label: String, value: Int) -> NSButton {
+                let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage(), target: self, action: #selector(selectFeedback(_:)))
+                button.identifier = NSUserInterfaceItemIdentifier(message.id); button.tag = value; button.isBordered = false; button.setButtonType(.toggle)
+                button.contentTintColor = .secondaryLabelColor; button.toolTip = label
+                button.state = (message.feedback == (value == 1 ? "positive" : "negative")) ? .on : .off
+                return button
+            }
+            let good = feedbackButton("hand.thumbsup", label: "好的回答", value: 1)
+            let bad = feedbackButton("hand.thumbsdown", label: "有问题的回答", value: -1)
+            feedbackButtons[message.id] = (good, bad)
+            let branch = NSButton(image: NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "在新对话中分支") ?? NSImage(), target: self, action: #selector(branchMessage(_:)))
+            branch.identifier = copy.identifier; branch.isBordered = false; branch.contentTintColor = .secondaryLabelColor; branch.toolTip = "在新对话中分支"
             let menu = NSMenu(); let delete = NSMenuItem(title: "删除消息", action: #selector(deleteMessageFromMenu(_:)), keyEquivalent: "")
             delete.target = self; delete.representedObject = message.id; menu.addItem(delete); row.menu = menu
             let formatter = DateFormatter(); formatter.dateFormat = "M月d日 HH:mm"
             let time = NSTextField(labelWithString: formatter.string(from: message.createdAt)); time.font = .systemFont(ofSize: 10); time.textColor = .tertiaryLabelColor
-            let footer = NSStackView(views: [copy, time]); footer.orientation = .horizontal; footer.spacing = 8
+            let footer = NSStackView(views: [copy, good, bad, branch, time]); footer.orientation = .horizontal; footer.spacing = 8
             footer.isHidden = message.content.isEmpty; assistantFooters[message.id] = footer; row.addArrangedSubview(footer)
         }
         row.wantsLayer = true; row.layer?.cornerRadius = 20
@@ -387,7 +416,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     func setMessageActivity(id: String, phase: AIChatActivityPhase, identity: String) { }
     func setStreaming(_ streaming: Bool) {
-        busy = streaming; sendButton.title = streaming ? "■" : "↑"; addButton.isEnabled = !streaming
+        busy = streaming; updateSendButton(); addButton.isEnabled = !streaming
         accessButton.isEnabled = !streaming
         for row in tabs.arrangedSubviews { for button in row.subviews.compactMap({ $0 as? NSButton }) { button.isEnabled = !streaming } }
         webButton.isEnabled = !streaming
@@ -397,7 +426,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard composer.string.isEmpty else { return }; composer.string = text; self.attachments = attachments; includePDF = includeCurrentPDF; updateAttachments(); draftChanged()
     }
     func restoreDraft(_ text: String, attachments: [AIChatImageAttachment], includePDF: Bool) {
-        suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; updateAttachments(); resizeComposer(); suppressDraftCallback = false
+        suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; updateAttachments(); resizeComposer(); updateSendButton(); suppressDraftCallback = false
     }
     func insertPrompt(_ text: String) { guard !text.isEmpty else { return }; composer.string = text + (composer.string.isEmpty ? "" : "\n\n" + composer.string); draftChanged(); focusComposer() }
     func insertQuote(_ text: String) { guard !text.isEmpty else { return }; composer.string = text + composer.string; draftChanged(); focusComposer() }
@@ -425,7 +454,12 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         return false
     }
-    private func draftChanged() { resizeComposer(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF) } }
+    private func draftChanged() { resizeComposer(); updateSendButton(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF) } }
+    private func updateSendButton() {
+        let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF
+        sendButton.isEnabled = busy || hasContent
+        sendButton.attributedTitle = NSAttributedString(string: busy ? "■" : "↑", attributes: [.font: NSFont.systemFont(ofSize: busy ? 13 : 19, weight: .medium), .foregroundColor: hasContent || busy ? NativeHarnessStyle.primary : NativeHarnessStyle.caption])
+    }
     private func updateAttachments() { attachmentLabel.stringValue = ([includePDF ? "PDF" : nil, attachments.isEmpty ? nil : "\(attachments.count) 张图片"].compactMap { $0 }).joined(separator: " · ") }
     private func scrollToBottom() { let clip = messagesScroll.contentView; let h = messagesStack.frame.height; clip.scroll(to: NSPoint(x: 0, y: max(0, h - clip.bounds.height))); messagesScroll.reflectScrolledClipView(clip) }
     @objc private func addConversation() { onNewConversation?() }
@@ -439,6 +473,13 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         sender.title = (view.isHidden ? "▸ " : "▾ ") + base
     }
     @objc private func deleteMessageFromMenu(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { onDeleteMessage?(id) } }
+    @objc private func selectFeedback(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue, let pair = feedbackButtons[id] else { return }
+        let value: String? = sender.state == .on ? (sender.tag == 1 ? "positive" : "negative") : nil
+        pair.0.state = value == "positive" ? .on : .off; pair.1.state = value == "negative" ? .on : .off
+        onFeedback?(id, value)
+    }
+    @objc private func branchMessage(_ sender: NSButton) { if let id = sender.identifier?.rawValue { onBranchMessage?(id) } }
     @objc private func changePreset() { guard let id = presetPopup.selectedItem?.representedObject as? String else { return }; selectedPreset = AIPromptPreset(rawValue: id); onPresetChange?(selectedPreset) }
     @objc private func applyPreset() { onApplyPrompt?(selectedPreset) }
     @objc private func revealHistory() { onRevealCurrentHistory?() }
@@ -546,7 +587,8 @@ private final class NativePaperComposer: NSTextView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard string.isEmpty else { return }
-        let attributes: [NSAttributedString.Key: Any] = [.font: placeholderFont, .foregroundColor: NativeHarnessStyle.caption]
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingTail
+        let attributes: [NSAttributedString.Key: Any] = [.font: placeholderFont, .foregroundColor: NativeHarnessStyle.caption, .paragraphStyle: paragraph]
         let placeholder = "发消息或创建任务, / 调用指令, @ 文件或对话" as NSString
         placeholder.draw(in: NSRect(x: textContainerInset.width + 5, y: textContainerInset.height, width: max(0, bounds.width - 28), height: 24), withAttributes: attributes)
     }

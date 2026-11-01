@@ -1046,6 +1046,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiSidebar.onSelectConversation = { [weak self] in self?.selectAIConversation($0) }
         aiSidebar.onDeleteConversation = { [weak self] in self?.deleteAIConversation(id: $0) }
         aiSidebar.onDeleteMessage = { [weak self] in self?.deleteAIMessage($0) }
+        aiSidebar.onFeedback = { [weak self] id, value in
+            guard let self, let index = aiMessages.firstIndex(where: { $0.id == id }) else { return }
+            aiMessages[index].feedback = value; persistAIHistory()
+        }
+        aiSidebar.onBranchMessage = { [weak self] in self?.branchAIConversation(at: $0) }
         aiSidebar.onRevealCurrentHistory = { [weak self] in self?.revealCurrentAIHistoryFile() }
         aiSidebar.onPresetChange = { [weak self] in self?.updateAIConversationPreset($0) }
         aiSidebar.onSelectModel = { [weak self] id in
@@ -2145,6 +2150,18 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiHistory = history
         activateAIConversation(conversation.id, persistSelection: true)
         aiSidebar.focusComposer()
+    }
+
+    private func branchAIConversation(at messageID: String) {
+        guard aiTask == nil, var history = aiHistory, let sourceIndex = activeAIConversationIndex,
+              let messageIndex = aiMessages.firstIndex(where: { $0.id == messageID }) else { return }
+        let source = history.conversations[sourceIndex]
+        let branch = AIConversation(title: source.title, promptPreset: source.promptPreset,
+                                    messages: Array(aiMessages.prefix(through: messageIndex)),
+                                    modelRouteID: source.modelRouteID, reasoningEffort: source.reasoningEffort,
+                                    accessMode: source.accessMode)
+        history.conversations.append(branch); history.activeConversationID = branch.id; aiHistory = history
+        activateAIConversation(branch.id, persistSelection: true); aiSidebar.focusComposer()
     }
 
     private func updateAIConversationPreset(_ preset: AIPromptPreset) {
