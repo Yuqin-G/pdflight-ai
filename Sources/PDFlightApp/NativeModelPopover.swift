@@ -37,7 +37,7 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 42))
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        view.effectiveAppearance.performAsCurrentDrawingAppearance { view.layer?.backgroundColor = NativeHarnessStyle.menu.cgColor }
         view.layer?.cornerRadius = 9
         view.layer?.borderWidth = 0.5
         view.layer?.borderColor = NSColor.separatorColor.cgColor

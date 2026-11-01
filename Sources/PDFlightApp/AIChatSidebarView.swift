@@ -1966,6 +1966,8 @@ final class AIChatRenderedContentView: NSStackView {
     private var bodyFontSize: CGFloat = 14
     private var imageAttachments: [AIChatImageAttachment] = []
     private var harnessTypography = false
+    private var harnessSerifHeading = false
+    private var harnessHeadingLineHeight: CGFloat?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2133,12 +2135,18 @@ final class AIChatRenderedContentView: NSStackView {
             case 3: bodyFontSize + (harnessTypography ? 4 * bodyFontSize / 14 : 0)
             default: bodyFontSize
             }
+            harnessSerifHeading = harnessTypography && level <= 3
+            if harnessSerifHeading {
+                let lineHeight: CGFloat = level == 1 ? 30 : (level == 2 ? 28 : 26)
+                harnessHeadingLineHeight = lineHeight * bodyFontSize / 14
+            }
             addRichContent(
                 text,
                 fontSize: size,
-                weight: level <= 3 ? (harnessTypography ? .bold : .semibold) : (harnessTypography ? .semibold : .regular),
+                weight: level <= 3 ? .semibold : (harnessTypography ? .semibold : .regular),
                 paragraphSpacing: 9
             )
+            harnessSerifHeading = false; harnessHeadingLineHeight = nil
         case let .paragraph(text):
             addRichContent(text)
         case let .unorderedList(items):
@@ -2333,7 +2341,7 @@ final class AIChatRenderedContentView: NSStackView {
         let bodyFont = NSFont.systemFont(ofSize: resolvedSize, weight: weight)
         let paragraphStyle = NSMutableParagraphStyle()
         if harnessTypography {
-            paragraphStyle.minimumLineHeight = resolvedSize + (rendersMarkdown ? 10 : 8) * bodyFontSize / 14
+            paragraphStyle.minimumLineHeight = harnessHeadingLineHeight ?? (resolvedSize + (rendersMarkdown ? 10 : 8) * bodyFontSize / 14)
             paragraphStyle.paragraphSpacing = paragraphSpacing ?? 0
         } else {
             paragraphStyle.lineSpacing = max(3, resolvedSize * 0.42)
@@ -2463,9 +2471,18 @@ final class AIChatRenderedContentView: NSStackView {
             let isItalic = rawValue & 1 != 0
             let isStrong = rawValue & 2 != 0
             let isCode = rawValue & 4 != 0
-            var font = isCode
-                ? NSFont.monospacedSystemFont(ofSize: baseSize * 0.90, weight: .regular)
-                : NSFont.systemFont(ofSize: baseSize, weight: isStrong ? .semibold : baseWeight)
+            var font: NSFont
+            if isCode {
+                font = NSFont.monospacedSystemFont(ofSize: baseSize * 0.90, weight: .regular)
+            } else if harnessSerifHeading {
+                let descriptor = NSFontDescriptor(fontAttributes: [
+                    .name: "IowanOldStyle-Bold",
+                    .cascadeList: [NSFontDescriptor(name: "STSongti-SC-Bold", size: baseSize)]
+                ])
+                font = NSFont(descriptor: descriptor, size: baseSize) ?? NSFont.systemFont(ofSize: baseSize, weight: .semibold)
+            } else {
+                font = NSFont.systemFont(ofSize: baseSize, weight: isStrong ? .semibold : baseWeight)
+            }
             if isItalic, harnessTypography {
                 // The browser synthesizes italic CJK glyphs even when the
                 // fallback font has no italic face; match that behavior.

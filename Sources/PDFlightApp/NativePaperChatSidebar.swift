@@ -122,7 +122,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }()
     private static let background = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 30/255, green: 28/255, blue: 26/255, alpha: 1)
+            ? NSColor(srgbRed: 18/255, green: 17/255, blue: 16/255, alpha: 1)
             : NSColor(srgbRed: 247/255, green: 245/255, blue: 239/255, alpha: 1)
     }
     private static let accent = NSColor(srgbRed: 217/255, green: 119/255, blue: 87/255, alpha: 1)
@@ -198,7 +198,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         messagesStack.widthAnchor.constraint(equalTo: messagesScroll.contentView.widthAnchor, constant: -16).isActive = true
         composerCard.wantsLayer = true; composerCard.layer?.cornerRadius = 14
         composerCard.layer?.borderWidth = 0.5; composerCard.layer?.borderColor = NSColor.separatorColor.cgColor
-        composerCard.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { composerCard.layer?.backgroundColor = NativeHarnessStyle.input.cgColor }
         composerScroll.drawsBackground = false; composerScroll.hasVerticalScroller = true; composerScroll.autohidesScrollers = true
         composer.isRichText = false; composer.drawsBackground = false; composer.font = .systemFont(ofSize: 14 * chatZoom)
         composer.textContainerInset = NSSize(width: 7, height: 4); composer.delegate = self
@@ -391,9 +391,9 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             let menu = NSMenu(); let delete = NSMenuItem(title: "删除消息", action: #selector(deleteMessageFromMenu(_:)), keyEquivalent: "")
             delete.target = self; delete.representedObject = message.id; menu.addItem(delete); row.menu = menu
             let formatter = DateFormatter(); formatter.dateFormat = "M月d日 HH:mm"
-            let time = NSTextField(labelWithString: formatter.string(from: message.createdAt)); time.font = .systemFont(ofSize: 12 * chatZoom); time.textColor = NativeHarnessStyle.secondary
+            let time = NSTextField(labelWithString: formatter.string(from: message.createdAt)); time.font = .systemFont(ofSize: 12 * chatZoom); time.textColor = NativeHarnessStyle.tertiary
             for button in [copy, good, bad, branch] {
-                button.contentTintColor = NativeHarnessStyle.secondary
+                button.contentTintColor = NativeHarnessStyle.tertiary
                 button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12 * chatZoom, weight: .regular)
                 let width = button.widthAnchor.constraint(equalToConstant: 28 * chatZoom)
                 let height = button.heightAnchor.constraint(equalToConstant: 28 * chatZoom)
