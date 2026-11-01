@@ -214,10 +214,14 @@ enum PDFlightAIChecks {
         try check(backupData == raw, "expected the full original archive to be retained privately")
         let drafts = root.appendingPathComponent("drafts")
         try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
-        try write(["version": 1, "drafts": [["sessionId": "session-a", "draft": ["text": "unfinished draft", "references": []]]]], drafts.appendingPathComponent("capture.json"))
+        let draftText = "/model 草稿 @paper.pdf"
+        let refOffset = (draftText as NSString).range(of: "@paper.pdf").location
+        let reference: [String: Any] = ["source": "reference", "ref": "@paper.pdf", "offset": refOffset, "length": 10,
+                                        "label": "paper.pdf", "appearance": "file", "clipboardText": "@paper.pdf"]
+        try write(["version": 1, "drafts": [["sessionId": "session-a", "draft": ["text": draftText, "references": [reference], "command": ["token": "/model "]]]]], drafts.appendingPathComponent("capture.json"))
         let draftStore = AIChatHistoryStore(directoryURL: root.appendingPathComponent("draft-history"))
         var withDraft = try await draftStore.importHarnessIfNeeded(for: originalPDF, dataDirectory: data, pathMappingsURL: nil, draftDirectory: drafts)
-        try check(withDraft.conversations.first?.draft?.text == "unfinished draft", "expected captured desktop draft to migrate with its session")
+        try check(withDraft.conversations.first?.draft?.text == draftText && withDraft.conversations.first?.draft?.references?.first?.ref == "@paper.pdf" && withDraft.conversations.first?.draft?.command?.token == "/model ", "expected captured desktop draft, reference, and command to migrate with its session")
         withDraft.conversations[0].draft = AIChatDraft(text: "edited in native")
         try await draftStore.save(withDraft, for: originalPDF)
         let afterRestart = try await draftStore.importHarnessIfNeeded(for: originalPDF, dataDirectory: data, pathMappingsURL: nil, draftDirectory: drafts)

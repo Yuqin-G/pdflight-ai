@@ -13,7 +13,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 440, height: 700))
         var savedText = ""; var savedImages: [AIChatImageAttachment] = []; var savedPDF = false
-        sidebar.onDraftChange = { text, images, pdf, _ in savedText = text; savedImages = images; savedPDF = pdf }
+        sidebar.onDraftChange = { text, images, pdf, _, _, _ in savedText = text; savedImages = images; savedPDF = pdf }
         sidebar.restoreDraft("existing draft", attachments: [], includePDF: false)
         sidebar.insertQuote("[Paper · p. 2]\nquoted text\n\n")
         guard savedText == "[Paper · p. 2]\nquoted text\n\nexisting draft" else {
@@ -66,6 +66,12 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard sidebar.slashTrigger()?.query == "mod" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 15, userInfo: [NSLocalizedDescriptionKey: "斜杠指令应识别光标前的候选"]) }
         sidebar.consumeSlashTrigger()
         guard sidebar.composer.string == "保留文字  后文" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 16, userInfo: [NSLocalizedDescriptionKey: "执行指令必须保留其前后的草稿"]) }
+        let reference = AIChatDraftReference(source: "reference", ref: "@paper.pdf", offset: 3, length: 10, label: "paper.pdf", appearance: "file", clipboardText: "@paper.pdf")
+        sidebar.restoreDraft("草稿 @paper.pdf", attachments: [], includePDF: false, references: [reference])
+        sidebar.insertQuote("引文\n")
+        guard sidebar.draftReferences.first?.offset == 6 else { throw NSError(domain: "NativePaperChatSelfCheck", code: 17, userInfo: [NSLocalizedDescriptionKey: "插入引文必须调整引用位置"]) }
+        _ = sidebar.textView(sidebar.composer, shouldChangeTextIn: NSRange(location: 7, length: 1), replacementString: "x")
+        guard sidebar.draftReferences.isEmpty else { throw NSError(domain: "NativePaperChatSelfCheck", code: 18, userInfo: [NSLocalizedDescriptionKey: "编辑引用时不能保留错误引用"]) }
         let pdfMessage = AIChatMessage(role: .user, content: "阅读附件", pdfAttachmentName: "paper.pdf")
         sidebar.append(pdfMessage)
         let row = sidebar.messageRows[pdfMessage.id] as? NSStackView
@@ -87,7 +93,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     var onCancel: (() -> Void)?
     var onResizeBy: ((CGFloat) -> Void)?
     var onResizeEnded: (() -> Void)?
-    var onDraftChange: ((String, [AIChatImageAttachment], Bool, [String]) -> Void)?
+    var onDraftChange: ((String, [AIChatImageAttachment], Bool, [String], [AIChatDraftReference], AIChatDraftCommand?) -> Void)?
     var onRevealCurrentHistory: (() -> Void)?
     var onPresetChange: ((AIPromptPreset) -> Void)?
     var onApplyPrompt: ((AIPromptPreset) -> Void)?
@@ -134,6 +140,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var attachments: [AIChatImageAttachment] = []
     private var includePDF = false
     private var additionalPDFPaths: [String] = []
+    private var draftReferences: [AIChatDraftReference] = []
+    private var draftCommand: AIChatDraftCommand?
     private var templates = NativePaperPrompts.templates
     private var selectedPreset = AIPromptPreset.reading
     private var busy = false
@@ -503,16 +511,44 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     func prefill(_ text: String, attachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false, additionalPDFPaths: [String] = []) {
         guard composer.string.isEmpty else { return }; composer.string = text; self.attachments = attachments; includePDF = includeCurrentPDF; self.additionalPDFPaths = additionalPDFPaths; updateAttachments(); draftChanged()
     }
-    func restoreDraft(_ text: String, attachments: [AIChatImageAttachment], includePDF: Bool, additionalPDFPaths: [String] = []) {
+    func restoreDraft(_ text: String, attachments: [AIChatImageAttachment], includePDF: Bool, additionalPDFPaths: [String] = [], references: [AIChatDraftReference] = [], command: AIChatDraftCommand? = nil) {
         composerMenuPanel?.dismiss(); dismissedSlashLocation = nil
-        suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; self.additionalPDFPaths = additionalPDFPaths; updateAttachments(); resizeComposer(); updateSendButton(); suppressDraftCallback = false
+        suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; self.additionalPDFPaths = additionalPDFPaths; draftReferences = references; draftCommand = command; updateAttachments(); resizeComposer(); updateSendButton(); suppressDraftCallback = false
     }
-    func insertPrompt(_ text: String) { guard !text.isEmpty else { return }; composer.string = text + (composer.string.isEmpty ? "" : "\n\n" + composer.string); draftChanged(); focusComposer() }
-    func insertQuote(_ text: String) { guard !text.isEmpty else { return }; composer.string = text + composer.string; draftChanged(); focusComposer() }
+    func insertPrompt(_ text: String) {
+        guard !text.isEmpty else { return }
+        let prefix = text + (composer.string.isEmpty ? "" : "\n\n")
+        draftReferences = draftReferences.map { value in var result = value; result.offset += (prefix as NSString).length; return result }
+        draftCommand = nil; composer.string = prefix + composer.string; draftChanged(); focusComposer()
+    }
+    func insertQuote(_ text: String) {
+        guard !text.isEmpty else { return }
+        draftReferences = draftReferences.map { value in var result = value; result.offset += (text as NSString).length; return result }
+        draftCommand = nil; composer.string = text + composer.string; draftChanged(); focusComposer()
+    }
     func focusComposer() { window?.makeFirstResponder(composer) }
-    func clearComposer() { composerMenuPanel?.dismiss(); dismissedSlashLocation = nil; composer.string = ""; attachments = []; includePDF = false; additionalPDFPaths = []; updateAttachments(); draftChanged() }
+    func clearComposer() { composerMenuPanel?.dismiss(); dismissedSlashLocation = nil; composer.string = ""; attachments = []; includePDF = false; additionalPDFPaths = []; draftReferences = []; draftCommand = nil; updateAttachments(); draftChanged() }
     func presentHistoryMenu(_ menu: NSMenu) { menu.popUp(positioning: nil, at: .zero, in: recordButton) }
-    func textDidChange(_ notification: Notification) { composer.needsDisplay = true; resizeComposer(); draftChanged(); updateSlashMenu() }
+    func textDidChange(_ notification: Notification) {
+        if let command = draftCommand, !composer.string.hasPrefix(command.token.trimmingCharacters(in: .whitespacesAndNewlines)) { draftCommand = nil }
+        composer.needsDisplay = true; resizeComposer(); draftChanged(); updateSlashMenu()
+    }
+    func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        let insertedLength = ((replacementString ?? "") as NSString).length
+        let delta = insertedLength - affectedCharRange.length
+        draftReferences = draftReferences.compactMap { original in
+            var reference = original
+            let end = reference.offset + reference.length
+            if affectedCharRange.location + affectedCharRange.length <= reference.offset {
+                reference.offset += delta; return reference
+            }
+            if affectedCharRange.location >= end { return reference }
+            // An edited reference becomes ordinary text, so it cannot point to the wrong source.
+            return nil
+        }
+        if affectedCharRange.location == 0 { draftCommand = nil }
+        return true
+    }
     private func updateComposerTypography() {
         let font = NSFont.systemFont(ofSize: 14 * chatZoom)
         let style = NSMutableParagraphStyle(); style.minimumLineHeight = 24 * chatZoom
@@ -540,7 +576,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         return false
     }
-    private func draftChanged() { resizeComposer(); updateSendButton(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF, additionalPDFPaths) } }
+    private func draftChanged() { resizeComposer(); updateSendButton(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF, additionalPDFPaths, draftReferences, draftCommand) } }
     private func updateSendButton() {
         let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty
         let showsStop = busy && !hasContent

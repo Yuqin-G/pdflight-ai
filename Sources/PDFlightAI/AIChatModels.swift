@@ -230,14 +230,38 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+public struct AIChatDraftReference: Codable, Sendable, Equatable {
+    public var source: String
+    public var ref: String
+    public var offset: Int
+    public var length: Int
+    public var label: String
+    public var appearance: String?
+    public var clipboardText: String
+    public var invalid: Bool?
+
+    public init(source: String, ref: String, offset: Int, length: Int, label: String, appearance: String? = nil, clipboardText: String, invalid: Bool? = nil) {
+        self.source = source; self.ref = ref; self.offset = offset; self.length = length; self.label = label
+        self.appearance = appearance; self.clipboardText = clipboardText; self.invalid = invalid
+    }
+}
+
+public struct AIChatDraftCommand: Codable, Sendable, Equatable {
+    public var token: String
+    public init(token: String) { self.token = token }
+}
+
 public struct AIChatDraft: Codable, Sendable, Equatable {
     public var text: String
     public var imageAttachments: [AIChatImageAttachment]
     public var includeCurrentPDF: Bool
     public var additionalPDFPaths: [String]?
-    public init(text: String = "", imageAttachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false, additionalPDFPaths: [String]? = nil) {
+    public var references: [AIChatDraftReference]?
+    public var command: AIChatDraftCommand?
+    public init(text: String = "", imageAttachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false, additionalPDFPaths: [String]? = nil, references: [AIChatDraftReference]? = nil, command: AIChatDraftCommand? = nil) {
         self.text = text; self.imageAttachments = imageAttachments; self.includeCurrentPDF = includeCurrentPDF
         self.additionalPDFPaths = additionalPDFPaths
+        self.references = references; self.command = command
     }
 }
 

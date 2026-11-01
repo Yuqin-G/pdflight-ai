@@ -124,7 +124,7 @@ public actor AIChatHistoryStore {
         guard prepared.paperID != nil else { return try history(for: documentURL) }
         var merged = try importHarness(prepared, for: documentURL)
         if let draftDirectory, FileManager.default.fileExists(atPath: draftDirectory.path) {
-            var candidates: [String: Set<String>] = [:]
+            var candidates: [String: Set<Data>] = [:]
             let files = try FileManager.default.contentsOfDirectory(at: draftDirectory, includingPropertiesForKeys: nil)
             for file in files where file.pathExtension == "json" {
                 guard let raw = try? Data(contentsOf: file),
@@ -133,17 +133,30 @@ public actor AIChatHistoryStore {
                 for entry in drafts {
                     guard let id = entry["sessionId"] as? String,
                           let draft = entry["draft"] as? [String: Any],
-                          let text = draft["text"] as? String, !text.isEmpty,
-                          (draft["references"] as? [Any] ?? []).isEmpty else { continue }
-                    candidates[id, default: []].insert(text)
+                          let text = draft["text"] as? String, !text.isEmpty else { continue }
+                    let referenceData = try JSONSerialization.data(withJSONObject: draft["references"] as? [Any] ?? [])
+                    guard let references = try? JSONDecoder().decode([AIChatDraftReference].self, from: referenceData) else { continue }
+                    let source = text as NSString
+                    var lastEnd = 0
+                    guard references.allSatisfy({ reference in
+                        guard reference.offset >= lastEnd, reference.length > 0,
+                              reference.offset <= source.length, reference.length <= source.length - reference.offset,
+                              source.substring(with: NSRange(location: reference.offset, length: reference.length)) == reference.clipboardText else { return false }
+                        lastEnd = reference.offset + reference.length
+                        return true
+                    }) else { continue }
+                    let command = (draft["command"] as? [String: Any]).flatMap { $0["token"] as? String }.map(AIChatDraftCommand.init(token:))
+                    let converted = AIChatDraft(text: text, references: references.isEmpty ? nil : references, command: command)
+                    let draftEncoder = JSONEncoder(); draftEncoder.outputFormatting = [.sortedKeys]
+                    candidates[id, default: []].insert(try draftEncoder.encode(converted))
                 }
             }
             var changed = false
             for index in merged.conversations.indices {
                 let conversation = merged.conversations[index]
                 guard conversation.draft == nil, let values = candidates[conversation.id], values.count == 1,
-                      let text = values.first else { continue }
-                merged.conversations[index].draft = AIChatDraft(text: text)
+                      let data = values.first, let draft = try? JSONDecoder().decode(AIChatDraft.self, from: data) else { continue }
+                merged.conversations[index].draft = draft
                 changed = true
             }
             if changed { try save(merged, for: documentURL) }

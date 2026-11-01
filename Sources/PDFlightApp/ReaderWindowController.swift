@@ -1077,9 +1077,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             aiSidebar.insertPrompt(NativePaperPrompts.text(for: preset.rawValue, title: paperTitle, page: currentPage + 1, selection: selectedPDFText()))
         }
         aiSidebar.onCancel = { [weak self] in self?.aiTask?.cancel() }
-        aiSidebar.onDraftChange = { [weak self] text, images, pdf, additionalPDFPaths in
+        aiSidebar.onDraftChange = { [weak self] text, images, pdf, additionalPDFPaths, references, command in
             guard let self, let index = activeAIConversationIndex, let id = aiHistory?.conversations[index].id else { return }
-            let draft = AIChatDraft(text: text, imageAttachments: images, includeCurrentPDF: pdf, additionalPDFPaths: additionalPDFPaths)
+            let draft = AIChatDraft(text: text, imageAttachments: images, includeCurrentPDF: pdf, additionalPDFPaths: additionalPDFPaths,
+                                    references: references.isEmpty ? nil : references, command: command)
             do { try aiChatHistoryStore.saveDraft(draft, sessionID: id, for: documentURL) }
             catch { aiSidebar.setActivity(.failed, detail: "草稿保存失败：\(error.localizedDescription)") }
             aiHistory?.conversations[index].draft = draft
@@ -2110,7 +2111,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiSidebar.setWebConversationURL(history.conversations[index].webConversationURL)
         let draft = (try? aiChatHistoryStore.readDraft(sessionID: conversationID, for: documentURL))
             ?? history.conversations[index].draft ?? AIChatDraft()
-        aiSidebar.restoreDraft(draft.text, attachments: draft.imageAttachments, includePDF: draft.includeCurrentPDF, additionalPDFPaths: draft.additionalPDFPaths ?? [])
+        aiSidebar.restoreDraft(draft.text, attachments: draft.imageAttachments, includePDF: draft.includeCurrentPDF, additionalPDFPaths: draft.additionalPDFPaths ?? [], references: draft.references ?? [], command: draft.command)
         if aiMessages.isEmpty {
             let preset = history.conversations[index].promptPreset
             let template = promptTemplate(for: preset)
