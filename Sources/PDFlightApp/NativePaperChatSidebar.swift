@@ -101,6 +101,39 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         sidebar.feedbackButtons[answer.id]?.0.performClick(nil)
         guard feedback == "positive" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "回答反馈必须能切换"]) }
+        let savedZoom = UserDefaults.standard.object(forKey: "reader.nativePaperChatZoom")
+        defer {
+            if let savedZoom { UserDefaults.standard.set(savedZoom, forKey: "reader.nativePaperChatZoom") }
+            else { UserDefaults.standard.removeObject(forKey: "reader.nativePaperChatZoom") }
+        }
+        sidebar.setChatZoom(1)
+        sidebar.layoutSubtreeIfNeeded()
+        sidebar.previewChatZoomChange(40, phase: .changed)
+        guard sidebar.chatZoom == 1, let preview = sidebar.previewChatZoom, preview > 1,
+              abs(sidebar.messagesScroll.magnification - preview) < 0.01 else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 23, userInfo: [NSLocalizedDescriptionKey: "捏合时必须先预览，不逐次重建消息"])
+        }
+        sidebar.previewChatZoomChange(0, phase: .ended)
+        guard sidebar.previewChatZoom == nil, abs(sidebar.chatZoom - preview) < 0.001,
+              abs(sidebar.messagesScroll.magnification - 1) < 0.001 else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 24, userInfo: [NSLocalizedDescriptionKey: "捏合结束后必须应用并保存最终缩放"])
+        }
+        if ProcessInfo.processInfo.environment["PDFLIGHT_BENCHMARK_ZOOM"] == "1" {
+            let fixture = String(repeating: "**实验结果**：这是一段较长的论文分析，包含中文与 English text。\n\n", count: 12)
+            for _ in 0..<20 { sidebar.append(AIChatMessage(role: .assistant, content: fixture)) }
+            sidebar.layoutSubtreeIfNeeded()
+            var start = Date()
+            for index in 0..<20 { sidebar.setChatZoom(1 + CGFloat(index) * 0.005) }
+            let rebuildDuration = Date().timeIntervalSince(start)
+            sidebar.setChatZoom(1)
+            start = Date()
+            for _ in 0..<20 { sidebar.previewChatZoomChange(1.25, phase: .changed) }
+            let previewDuration = Date().timeIntervalSince(start)
+            start = Date()
+            sidebar.previewChatZoomChange(0, phase: .ended)
+            let commitDuration = Date().timeIntervalSince(start)
+            print(String(format: "Zoom benchmark (20 messages, 20 events): rebuild %.3fs, preview %.3fs, final reflow %.3fs", rebuildDuration, previewDuration, commitDuration))
+        }
     }
     var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool, [String], [AIChatDraftReference]) -> Void)?
     var onConfigure: (() -> Void)?
@@ -186,6 +219,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         let value = UserDefaults.standard.double(forKey: "reader.nativePaperChatZoom")
         return value >= 0.8 && value <= 2.4 ? value : 1
     }()
+    // During a gesture, scale the existing view instead of rebuilding every
+    // Markdown and formula view for every trackpad event. Reflow once at rest.
+    private var previewChatZoom: CGFloat?
+    private var zoomCommitWork: DispatchWorkItem?
     private static let background = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor(srgbRed: 18/255, green: 17/255, blue: 16/255, alpha: 1)
@@ -259,7 +296,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         messagesStack.edgeInsets = NSEdgeInsets(top: 18, left: 16, bottom: 18, right: 16)
         messagesScroll.hasVerticalScroller = true; messagesScroll.autohidesScrollers = true
         messagesScroll.drawsBackground = false; messagesScroll.documentView = messagesStack
-        messagesScroll.onZoom = { [weak self] delta in self?.setChatZoom((self?.chatZoom ?? 1) * exp(delta * 0.004)) }
+        messagesScroll.allowsMagnification = true
+        messagesScroll.minMagnification = 1.0 / 3.0
+        messagesScroll.maxMagnification = 3.0
+        messagesScroll.onZoom = { [weak self] delta, phase in self?.previewChatZoomChange(delta, phase: phase) }
         messagesStack.translatesAutoresizingMaskIntoConstraints = false
         messagesStack.widthAnchor.constraint(equalTo: messagesScroll.contentView.widthAnchor, constant: -16).isActive = true
         composerCard.wantsLayer = true; composerCard.layer?.cornerRadius = 14
@@ -347,6 +387,49 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         accessButton.attributedTitle = NSAttributedString(string: mode.title + " ▾", attributes: [.font: NSFont.systemFont(ofSize: 13 * chatZoom), .foregroundColor: NativeHarnessStyle.primary])
         accessButton.contentTintColor = NativeHarnessStyle.primary
     }
+    private func previewChatZoomChange(_ delta: CGFloat, phase: NSEvent.Phase) {
+        guard delta.isFinite else { return }
+        if delta != 0 {
+            let next = min(2.4, max(0.8, (previewChatZoom ?? chatZoom) * exp(delta * 0.004)))
+            previewChatZoom = next
+            let clip = messagesScroll.contentView
+            let center = messagesStack.convert(NSPoint(x: clip.bounds.midX, y: clip.bounds.midY), from: clip)
+            messagesScroll.setMagnification(next / chatZoom, centeredAt: center)
+            zoomButton.title = "\(Int((next * 100).rounded()))%"
+            zoomButton.isHidden = abs(next - 1) < 0.005
+            zoomWidth?.constant = zoomButton.isHidden ? 0 : 40
+        }
+        zoomCommitWork?.cancel()
+        if phase == .ended || phase == .cancelled {
+            commitPreviewChatZoom()
+        } else {
+            // Some mouse wheels do not report an end phase.
+            let work = DispatchWorkItem { [weak self] in self?.commitPreviewChatZoom() }
+            zoomCommitWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+        }
+    }
+
+    private func commitPreviewChatZoom() {
+        zoomCommitWork?.cancel()
+        zoomCommitWork = nil
+        guard let value = previewChatZoom else { return }
+        previewChatZoom = nil
+        let clip = messagesScroll.contentView
+        let oldHeight = max(1, messagesStack.bounds.height)
+        let centerFraction = min(1, max(0, messagesScroll.documentVisibleRect.midY / oldHeight))
+        let wasAtBottom = messagesScroll.documentVisibleRect.maxY >= oldHeight - 2
+        messagesScroll.setMagnification(1, centeredAt: .zero)
+        setChatZoom(value)
+        messagesStack.layoutSubtreeIfNeeded()
+        messagesScroll.layoutSubtreeIfNeeded()
+        let height = messagesStack.bounds.height
+        let maxY = max(0, height - clip.bounds.height)
+        let y = wasAtBottom ? maxY : min(maxY, max(0, height * centerFraction - clip.bounds.height / 2))
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        messagesScroll.reflectScrolledClipView(clip)
+    }
+
     private func setChatZoom(_ value: CGFloat) {
         guard value.isFinite else { return }
         chatZoom = min(2.4, max(0.8, value))
@@ -369,7 +452,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         updateComposerTypography(); resizeComposer(); setAccessMode(accessMode)
         if let route = modelRoutes.first(where: { $0.id == currentModelRouteID }) { setModelTitle(route.name) }
     }
-    @objc private func resetChatZoom() { setChatZoom(1) }
+    @objc private func resetChatZoom() { commitPreviewChatZoom(); setChatZoom(1) }
     func setWebConversationURL(_ value: String?) {
         let url = value.flatMap(URL.init(string:))
         webConversationURL = url.flatMap { ["http", "https"].contains($0.scheme?.lowercased() ?? "") ? $0 : nil }
@@ -965,10 +1048,10 @@ private final class NativePaperMessageStack: NSStackView {
 }
 
 private final class NativePaperChatScrollView: NSScrollView {
-    var onZoom: ((CGFloat) -> Void)?
-    override func magnify(with event: NSEvent) { onZoom?(event.magnification * 250) }
+    var onZoom: ((CGFloat, NSEvent.Phase) -> Void)?
+    override func magnify(with event: NSEvent) { onZoom?(event.magnification * 250, event.phase) }
     override func scrollWheel(with event: NSEvent) {
-        if event.modifierFlags.contains(.command) { onZoom?(event.scrollingDeltaY); return }
+        if event.modifierFlags.contains(.command) { onZoom?(event.scrollingDeltaY, event.phase); return }
         super.scrollWheel(with: event)
     }
 }
