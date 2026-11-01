@@ -30,6 +30,11 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
 
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 42))
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        view.layer?.cornerRadius = 9
+        view.layer?.borderWidth = 0.5
+        view.layer?.borderColor = NSColor.separatorColor.cgColor
         stack.orientation = .vertical; stack.alignment = .width; stack.spacing = 0
         stack.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
         stack.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(stack)

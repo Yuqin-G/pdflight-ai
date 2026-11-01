@@ -90,7 +90,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var userBubbleHasImages: Set<String> = []
     private var reasoningViews: [String: NSTextField] = [:]
     private var reasoningButtons: [String: NSButton] = [:]
-    private var assistantFooters: [String: NSView] = [:]
+    private var assistantFooters: [String: NSStackView] = [:]
+    private var footerButtonSizes: [NSLayoutConstraint] = []
     private var feedbackButtons: [String: (NSButton, NSButton)] = [:]
     private var attachments: [AIChatImageAttachment] = []
     private var includePDF = false
@@ -160,6 +161,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         let promptLabel = NSTextField(labelWithString: "阅读提示词")
         promptLabel.font = .systemFont(ofSize: 11); promptLabel.textColor = .secondaryLabelColor
         presetPopup.font = .systemFont(ofSize: 11); presetPopup.target = self; presetPopup.action = #selector(changePreset)
+        presetPopup.isBordered = false; presetPopup.wantsLayer = true
+        presetPopup.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        presetPopup.layer?.borderWidth = 0.5; presetPopup.layer?.borderColor = NSColor.separatorColor.cgColor
+        presetPopup.layer?.cornerRadius = 5
         applyButton.isBordered = false; applyButton.font = .systemFont(ofSize: 11)
         applyButton.target = self; applyButton.action = #selector(applyPreset)
         recordButton.isBordered = false; recordButton.toolTip = "打开会话记录目录"
@@ -264,6 +269,15 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         zoomWidth?.constant = zoomButton.isHidden ? 0 : 40
         UserDefaults.standard.set(Double(chatZoom), forKey: "reader.nativePaperChatZoom")
         messages.values.forEach { $0.setFontSize(14 * chatZoom) }
+        footerButtonSizes.forEach { $0.constant = 28 * chatZoom }
+        for footer in assistantFooters.values {
+            footer.spacing = 8 * chatZoom
+            footer.arrangedSubviews.compactMap { $0 as? NSTextField }.forEach { $0.font = .systemFont(ofSize: 12 * chatZoom) }
+            footer.arrangedSubviews.compactMap { $0 as? NSButton }.forEach { $0.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12 * chatZoom, weight: .regular) }
+            if let row = footer.superview as? NSStackView, let rendered = row.arrangedSubviews.first(where: { $0 is AIChatRenderedContentView }) {
+                row.setCustomSpacing(16 * chatZoom, after: rendered)
+            }
+        }
         for (id, constraint) in userBubbleWidths {
             constraint.constant = bubbleWidth(for: messageContents[id] ?? "", hasImages: userBubbleHasImages.contains(id))
         }
@@ -310,7 +324,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     func install(_ values: [AIChatMessage]) {
         messagesStack.arrangedSubviews.forEach { messagesStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        messages.removeAll(); messageRows.removeAll(); messageContents.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); assistantFooters.removeAll(); feedbackButtons.removeAll(); values.forEach(append)
+        messages.removeAll(); messageRows.removeAll(); messageContents.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); assistantFooters.removeAll(); footerButtonSizes.removeAll(); feedbackButtons.removeAll(); values.forEach(append)
     }
     func append(_ message: AIChatMessage) {
         let rendered = AIChatRenderedContentView(); rendered.translatesAutoresizingMaskIntoConstraints = false; rendered.alignment = .width
@@ -366,12 +380,23 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             let menu = NSMenu(); let delete = NSMenuItem(title: "删除消息", action: #selector(deleteMessageFromMenu(_:)), keyEquivalent: "")
             delete.target = self; delete.representedObject = message.id; menu.addItem(delete); row.menu = menu
             let formatter = DateFormatter(); formatter.dateFormat = "M月d日 HH:mm"
-            let time = NSTextField(labelWithString: formatter.string(from: message.createdAt)); time.font = .systemFont(ofSize: 10); time.textColor = .tertiaryLabelColor
-            let footer = NSStackView(views: [copy, good, bad, branch, time]); footer.orientation = .horizontal; footer.spacing = 8
+            let time = NSTextField(labelWithString: formatter.string(from: message.createdAt)); time.font = .systemFont(ofSize: 12 * chatZoom); time.textColor = NativeHarnessStyle.secondary
+            for button in [copy, good, bad, branch] {
+                button.contentTintColor = NativeHarnessStyle.secondary
+                button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12 * chatZoom, weight: .regular)
+                let width = button.widthAnchor.constraint(equalToConstant: 28 * chatZoom)
+                let height = button.heightAnchor.constraint(equalToConstant: 28 * chatZoom)
+                NSLayoutConstraint.activate([width, height]); footerButtonSizes.append(contentsOf: [width, height])
+            }
+            let footer = NSStackView(views: [copy, good, bad, branch, time]); footer.orientation = .horizontal; footer.spacing = 8 * chatZoom
             footer.isHidden = message.content.isEmpty; assistantFooters[message.id] = footer; row.addArrangedSubview(footer)
+            row.setCustomSpacing(16 * chatZoom, after: rendered)
         }
         row.wantsLayer = true; row.layer?.cornerRadius = 20
-        if message.role == .user { row.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor; row.edgeInsets = NSEdgeInsets(top: 10, left: 16, bottom: 10, right: 16) }
+        if message.role == .user {
+            effectiveAppearance.performAsCurrentDrawingAppearance { row.layer?.backgroundColor = NativeHarnessStyle.userBubble.cgColor }
+            row.edgeInsets = NSEdgeInsets(top: 10 * chatZoom, left: 16 * chatZoom, bottom: 10 * chatZoom, right: 16 * chatZoom)
+        }
         messagesStack.addArrangedSubview(row)
         if message.role != .user {
             row.widthAnchor.constraint(equalTo: messagesStack.widthAnchor, constant: -32).isActive = true

@@ -1,6 +1,11 @@
 import AppKit
 
 enum NativeHarnessStyle {
+    static let userBubble = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 44/255, green: 44/255, blue: 46/255, alpha: 1)
+            : NSColor(srgbRed: 237/255, green: 243/255, blue: 254/255, alpha: 1)
+    }
     static let primary = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor(srgbRed: 249/255, green: 250/255, blue: 251/255, alpha: 1)

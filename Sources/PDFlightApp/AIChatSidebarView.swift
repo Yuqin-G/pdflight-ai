@@ -1992,12 +1992,13 @@ final class AIChatRenderedContentView: NSStackView {
 
     func setFontSize(_ fontSize: CGFloat) {
         bodyFontSize = min(34, max(11, fontSize))
+        if harnessTypography { spacing = 16 * bodyFontSize / 14 }
         render()
     }
 
     func useHarnessTypography() {
         harnessTypography = true
-        spacing = 16
+        spacing = 16 * bodyFontSize / 14
         render()
     }
 
