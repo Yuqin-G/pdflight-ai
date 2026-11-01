@@ -1965,6 +1965,7 @@ final class AIChatRenderedContentView: NSStackView {
     private var rendersMarkdown = false
     private var bodyFontSize: CGFloat = 14
     private var imageAttachments: [AIChatImageAttachment] = []
+    private var harnessTypography = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1991,6 +1992,12 @@ final class AIChatRenderedContentView: NSStackView {
 
     func setFontSize(_ fontSize: CGFloat) {
         bodyFontSize = min(34, max(11, fontSize))
+        render()
+    }
+
+    func useHarnessTypography() {
+        harnessTypography = true
+        spacing = 16
         render()
     }
 
@@ -2118,23 +2125,26 @@ final class AIChatRenderedContentView: NSStackView {
     private func add(_ block: AIChatMarkdownBlock) {
         switch block {
         case let .heading(level, text):
+            if harnessTypography, level <= 3, let previous = arrangedSubviews.last { setCustomSpacing(32 * bodyFontSize / 14, after: previous) }
             let size: CGFloat = switch level {
-            case 1: bodyFontSize + 4
-            case 2: bodyFontSize + 2
+            case 1: bodyFontSize + (harnessTypography ? 7 * bodyFontSize / 14 : 4)
+            case 2: bodyFontSize + (harnessTypography ? 5 * bodyFontSize / 14 : 2)
+            case 3: bodyFontSize + (harnessTypography ? 4 * bodyFontSize / 14 : 0)
             default: bodyFontSize
             }
             addRichContent(
                 text,
                 fontSize: size,
-                weight: level <= 3 ? .semibold : .regular,
+                weight: level <= 3 ? (harnessTypography ? .bold : .semibold) : (harnessTypography ? .semibold : .regular),
                 paragraphSpacing: 9
             )
         case let .paragraph(text):
             addRichContent(text)
         case let .unorderedList(items):
             let indent = listItemIndent(marker: "•")
-            for item in items {
+            for (index, item) in items.enumerated() {
                 addRichContent(item, paragraphSpacing: 1, hangingIndent: ("•", indent))
+                if harnessTypography, index < items.count - 1, let last = arrangedSubviews.last { setCustomSpacing(6 * bodyFontSize / 14, after: last) }
             }
         case let .orderedList(start, items):
             for (offset, item) in items.enumerated() {
@@ -2144,6 +2154,7 @@ final class AIChatRenderedContentView: NSStackView {
                     paragraphSpacing: 1,
                     hangingIndent: (marker, listItemIndent(marker: marker))
                 )
+                if harnessTypography, offset < items.count - 1, let last = arrangedSubviews.last { setCustomSpacing(6 * bodyFontSize / 14, after: last) }
             }
         case let .blockquote(text):
             addRichContent(
@@ -2305,10 +2316,16 @@ final class AIChatRenderedContentView: NSStackView {
         hangingIndent: (marker: String, indent: CGFloat)? = nil
     ) -> NSAttributedString {
         let resolvedSize = fontSize
+        let color = harnessTypography && color == .labelColor ? NativeHarnessStyle.primary : color
         let bodyFont = NSFont.systemFont(ofSize: resolvedSize, weight: weight)
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = max(3, resolvedSize * 0.42)
-        paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(5, resolvedSize * 0.5)
+        if harnessTypography {
+            paragraphStyle.minimumLineHeight = resolvedSize + (rendersMarkdown ? 10 : 8) * bodyFontSize / 14
+            paragraphStyle.paragraphSpacing = paragraphSpacing ?? 0
+        } else {
+            paragraphStyle.lineSpacing = max(3, resolvedSize * 0.42)
+            paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(5, resolvedSize * 0.5)
+        }
         if let hangingIndent {
             paragraphStyle.headIndent = hangingIndent.indent
             paragraphStyle.firstLineHeadIndent = 0

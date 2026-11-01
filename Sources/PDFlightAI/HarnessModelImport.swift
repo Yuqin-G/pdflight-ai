@@ -6,6 +6,7 @@ import Yams
 public enum HarnessModelImport {
     public struct Route: Codable, Sendable, Equatable, Identifiable {
         public let provider: String
+        public let providerName: String?
         public let model: String
         public let name: String
         public let api: String
@@ -91,12 +92,13 @@ public enum HarnessModelImport {
                 let secret = ProcessInfo.processInfo.environment[keyName] ?? refs[keyName] as? String
                 if let secret, !secret.isEmpty { secrets[provider] = secret }
             }
+            let providerName = item["displayName"] as? String
             for item in models {
                 guard let model = item["id"] as? String, !model.isEmpty else { continue }
                 let effortMap = item["reasoningEfforts"] as? [String: Any] ?? [:]
                 let orderedEfforts = ["off", "low", "medium", "high", "xhigh", "max"].filter { effortMap[$0] != nil }
                 let compat = item["compat"] as? [String: Any]
-                routes.append(Route(provider: provider, model: model, name: item["name"] as? String ?? model,
+                routes.append(Route(provider: provider, providerName: providerName, model: model, name: item["name"] as? String ?? model,
                                     api: api, baseURL: baseURL, reasoningEfforts: orderedEfforts.isEmpty ? nil : orderedEfforts,
                                     forceAdaptiveThinking: compat?["forceAdaptiveThinking"] as? Bool,
                                     maxTokens: item["maxTokens"] as? Int))
