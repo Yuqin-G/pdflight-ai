@@ -685,6 +685,14 @@ enum PDFlightAIChecks {
             blocks.contains(.blockquote("Important result")),
             "expected a block quote"
         )
+        let nested = AIChatMarkdownParser.blocks(in: "- Parent\n  1. First\n     - Detail\n  2. Second\n- Sibling")
+        try check(nested == [.structuredList([
+            AIChatListItem(marker: "•", text: "Parent", depth: 0),
+            AIChatListItem(marker: "1.", text: "First", depth: 1),
+            AIChatListItem(marker: "▪", text: "Detail", depth: 2),
+            AIChatListItem(marker: "2.", text: "Second", depth: 1),
+            AIChatListItem(marker: "•", text: "Sibling", depth: 0)
+        ])], "mixed nested lists must retain their markers, order and indentation")
         try check(
             blocks.contains(.table(
                 headers: ["Metric", "Score"],

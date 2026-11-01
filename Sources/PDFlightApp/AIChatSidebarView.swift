@@ -2152,7 +2152,7 @@ final class AIChatRenderedContentView: NSStackView {
         case let .unorderedList(items):
             let indent = listItemIndent(marker: "•")
             for (index, item) in items.enumerated() {
-                addRichContent(item, paragraphSpacing: 1, hangingIndent: ("•", indent))
+                addRichContent(item, paragraphSpacing: 1, hangingIndent: ("•", indent, 0))
                 if harnessTypography, index < items.count - 1, let last = arrangedSubviews.last { setCustomSpacing(6 * bodyFontSize / 14, after: last) }
             }
         case let .orderedList(start, items):
@@ -2161,9 +2161,18 @@ final class AIChatRenderedContentView: NSStackView {
                 addRichContent(
                     item,
                     paragraphSpacing: 1,
-                    hangingIndent: (marker, listItemIndent(marker: marker))
+                    hangingIndent: (marker, listItemIndent(marker: marker), 0)
                 )
                 if harnessTypography, offset < items.count - 1, let last = arrangedSubviews.last { setCustomSpacing(6 * bodyFontSize / 14, after: last) }
+            }
+        case let .structuredList(items):
+            for (index, item) in items.enumerated() {
+                let indent = listItemIndent(marker: item.marker)
+                addRichContent(item.text, paragraphSpacing: 1,
+                               hangingIndent: (item.marker, indent, CGFloat(item.depth) * 18 * bodyFontSize / 14))
+                if harnessTypography, index < items.count - 1, let last = arrangedSubviews.last {
+                    setCustomSpacing((items[index + 1].depth > item.depth ? 4 : 6) * bodyFontSize / 14, after: last)
+                }
             }
         case let .blockquote(text):
             if harnessTypography {
@@ -2208,7 +2217,7 @@ final class AIChatRenderedContentView: NSStackView {
         weight: NSFont.Weight = .regular,
         color: NSColor = .labelColor,
         paragraphSpacing: CGFloat? = nil,
-        hangingIndent: (marker: String, indent: CGFloat)? = nil
+        hangingIndent: (marker: String, indent: CGFloat, leading: CGFloat)? = nil
     ) {
         var inlineSegments: [AIMessageContentSegment] = []
         for segment in AIMessageContentParser.segments(in: content) {
@@ -2253,7 +2262,7 @@ final class AIChatRenderedContentView: NSStackView {
         weight: NSFont.Weight,
         color: NSColor,
         paragraphSpacing: CGFloat?,
-        hangingIndent: (marker: String, indent: CGFloat)? = nil
+        hangingIndent: (marker: String, indent: CGFloat, leading: CGFloat)? = nil
     ) {
         guard !segments.isEmpty else { return }
         let resolvedSize = fontSize ?? bodyFontSize
@@ -2334,7 +2343,7 @@ final class AIChatRenderedContentView: NSStackView {
         weight: NSFont.Weight,
         color: NSColor,
         paragraphSpacing: CGFloat?,
-        hangingIndent: (marker: String, indent: CGFloat)? = nil
+        hangingIndent: (marker: String, indent: CGFloat, leading: CGFloat)? = nil
     ) -> NSAttributedString {
         let resolvedSize = fontSize
         let color = harnessTypography && color == .labelColor ? NativeHarnessStyle.primary : color
@@ -2348,11 +2357,11 @@ final class AIChatRenderedContentView: NSStackView {
             paragraphStyle.paragraphSpacing = paragraphSpacing ?? max(5, resolvedSize * 0.5)
         }
         if let hangingIndent {
-            paragraphStyle.headIndent = hangingIndent.indent
-            paragraphStyle.firstLineHeadIndent = 0
+            paragraphStyle.headIndent = hangingIndent.leading + hangingIndent.indent
+            paragraphStyle.firstLineHeadIndent = hangingIndent.leading
             paragraphStyle.tabStops = [NSTextTab(
                 textAlignment: .left,
-                location: hangingIndent.indent
+                location: hangingIndent.leading + hangingIndent.indent
             )]
         }
         let styled: NSMutableAttributedString
@@ -2392,7 +2401,7 @@ final class AIChatRenderedContentView: NSStackView {
             styled.insert(
                 NSAttributedString(
                     string: "\(hangingIndent.marker)\t",
-                    attributes: [.font: markerFont, .foregroundColor: NSColor.tertiaryLabelColor]
+                    attributes: [.font: markerFont, .foregroundColor: harnessTypography ? NativeHarnessStyle.secondary : NSColor.tertiaryLabelColor]
                 ),
                 at: 0
             )

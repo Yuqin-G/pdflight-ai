@@ -1,10 +1,20 @@
 import Foundation
 
+public struct AIChatListItem: Sendable, Equatable {
+    public var marker: String
+    public var text: String
+    public var depth: Int
+    public init(marker: String, text: String, depth: Int) {
+        self.marker = marker; self.text = text; self.depth = depth
+    }
+}
+
 public enum AIChatMarkdownBlock: Sendable, Equatable {
     case heading(level: Int, text: String)
     case paragraph(String)
     case unorderedList([String])
     case orderedList(start: Int, items: [String])
+    case structuredList([AIChatListItem])
     case blockquote(String)
     case code(language: String?, content: String)
     case table(headers: [String], rows: [[String]])
@@ -98,25 +108,36 @@ public enum AIChatMarkdownParser {
                 continue
             }
 
-            if unorderedItem(from: line) != nil {
-                var items: [String] = []
-                while index < lines.count, let item = unorderedItem(from: lines[index]) {
-                    items.append(item)
+            if unorderedItem(from: line) != nil || orderedItem(from: line) != nil {
+                var collected: [(indent: Int, marker: String, text: String, ordered: Bool)] = []
+                while index < lines.count {
+                    let candidate = lines[index]
+                    let indent = candidate.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+                    if let item = unorderedItem(from: candidate) {
+                        collected.append((indent, "•", item, false))
+                    } else if let item = orderedItem(from: candidate) {
+                        collected.append((indent, "\(item.number).", item.text, true))
+                    } else { break }
                     index += 1
                 }
-                result.append(.unorderedList(items))
-                continue
-            }
-
-            if let first = orderedItem(from: line) {
-                var items = [first.text]
-                let start = first.number
-                index += 1
-                while index < lines.count, let item = orderedItem(from: lines[index]) {
-                    items.append(item.text)
-                    index += 1
+                let baseIndent = collected.map(\.indent).min() ?? 0
+                let mixed = Set(collected.map(\.ordered)).count > 1
+                if mixed || collected.contains(where: { $0.indent > baseIndent }) {
+                    var levels = [baseIndent]
+                    let items = collected.map { item -> AIChatListItem in
+                        while levels.count > 1 && item.indent < levels.last! { levels.removeLast() }
+                        if item.indent > levels.last! { levels.append(item.indent) }
+                        let depth = levels.count - 1
+                        let marker = item.ordered ? item.marker : ["•", "◦", "▪"][min(depth, 2)]
+                        return AIChatListItem(marker: marker, text: item.text, depth: depth)
+                    }
+                    result.append(.structuredList(items))
+                } else if collected.first?.ordered == true {
+                    let start = Int(collected[0].marker.dropLast()) ?? 1
+                    result.append(.orderedList(start: start, items: collected.map(\.text)))
+                } else {
+                    result.append(.unorderedList(collected.map(\.text)))
                 }
-                result.append(.orderedList(start: start, items: items))
                 continue
             }
 
