@@ -166,19 +166,20 @@ final class NativeModelPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { dismiss() }
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, let menu = contentViewController as? NativeComposerMenu, menu.handleKey(event) { return }
         if event.type == .keyDown, event.keyCode == 53, !(firstResponder is NSTextView) {
             dismiss(); return
         }
         super.sendEvent(event)
     }
 
-    init(controller: NativeModelPopover, parent: NSWindow, anchor: NSView) {
+    init(controller: NSViewController, parent: NSWindow, anchor: NSView) {
         owner = parent; self.anchor = anchor
         super.init(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
         isReleasedWhenClosed = false; isOpaque = false; backgroundColor = .clear
         hasShadow = true; animationBehavior = .none
         contentViewController = controller
-        controller.onResize = { [weak self] size in self?.position(size) }
+        (controller as? NativeModelPopover)?.onResize = { [weak self] size in self?.position(size) }
     }
 
     func present() {

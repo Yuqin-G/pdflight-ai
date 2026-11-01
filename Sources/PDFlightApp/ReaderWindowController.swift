@@ -1730,10 +1730,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let providerIdentity = aiProviderIdentity(for: configuration)
         aiSidebar.append(placeholder)
         aiSidebar.setStreaming(true)
-        aiSidebar.setActivity(
-            hasPDF ? .uploading : .preparing,
-            detail: hasPDF ? (includeCurrentPDF ? documentURL.lastPathComponent : URL(fileURLWithPath: additionalPDFPaths[0]).lastPathComponent) : configuration.model
-        )
+        aiSidebar.setActivity(.preparing, detail: "正在读取模型凭据")
         aiSidebar.setMessageActivity(
             id: placeholder.id,
             phase: .preparing,

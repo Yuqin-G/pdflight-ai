@@ -140,6 +140,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var customModelTitle = "自定义模型"
     private var webConversationURL: URL?
     private var modelPanel: NativeModelPanel?
+    private var composerMenuPanel: NativeModelPanel?
     private var chatZoom: CGFloat = {
         let value = UserDefaults.standard.double(forKey: "reader.nativePaperChatZoom")
         return value >= 0.8 && value <= 2.4 ? value : 1
@@ -625,10 +626,20 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     private func submitDraft() { let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty else { return }; onSend?(text, attachments, selectedPreset, includePDF, additionalPDFPaths) }
     @objc private func attach() {
-        let menu = NSMenu(); menu.addItem(withTitle: includePDF ? "移除当前 PDF" : "附加当前 PDF", action: #selector(togglePDF), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "添加图片或 PDF…", action: #selector(addFile), keyEquivalent: "").target = self
-        if !attachments.isEmpty { menu.addItem(withTitle: "移除所有图片", action: #selector(removeImages), keyEquivalent: "").target = self }
-        menu.popUp(positioning: nil, at: .zero, in: attachButton)
+        if composerMenuPanel != nil { composerMenuPanel?.dismiss(); return }
+        guard let parent = window else { return }
+        let add: [NativeComposerMenu.Item] = [
+            .init(title: "文件", token: "file", detail: "添加图片或 PDF", symbol: "paperclip", action: { [weak self] in self?.addFile() }),
+            .init(title: includePDF ? "移除当前 PDF" : "当前 PDF", token: "", detail: "", symbol: "doc", action: { [weak self] in self?.togglePDF() })
+        ]
+        let commands: [NativeComposerMenu.Item] = [
+            .init(title: "权限", token: "permission", detail: "切换权限预设", symbol: "exclamationmark.shield", action: { [weak self] in self?.configureAccess() }),
+            .init(title: "模型", token: "model", detail: "选择本会话使用的模型", symbol: "server.rack", action: { [weak self] in self?.configureModel() })
+        ]
+        let controller = NativeComposerMenu(width: max(280, composerCard.bounds.width), groups: [("添加", add), ("指令", commands)], dismiss: { [weak self] in self?.composerMenuPanel?.dismiss() })
+        let panel = NativeModelPanel(controller: controller, parent: parent, anchor: composerCard)
+        panel.onDismiss = { [weak self] in self?.composerMenuPanel = nil }
+        composerMenuPanel = panel; panel.present()
     }
     @objc private func togglePDF() {
         guard includePDF || additionalPDFPaths.count < 4 else { showAttachmentError("最多可附加 4 个 PDF。"); return }
