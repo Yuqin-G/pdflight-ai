@@ -94,6 +94,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         let answer = AIChatMessage(role: .assistant, content: "测试回答")
         var feedback: String?; sidebar.onFeedback = { id, value in if id == answer.id { feedback = value } }
         sidebar.append(answer)
+        let timedAnswer = AIChatMessage(role: .assistant, content: "回答", reasoning: "过程", elapsedSeconds: 65)
+        sidebar.append(timedAnswer)
+        guard sidebar.reasoningButtons[timedAnswer.id]?.title.contains("1分5秒") == true else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 22, userInfo: [NSLocalizedDescriptionKey: "完成时间必须在历史中恢复"])
+        }
         sidebar.feedbackButtons[answer.id]?.0.performClick(nil)
         guard feedback == "positive" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "回答反馈必须能切换"]) }
     }
@@ -147,6 +152,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var userBubbleHasImages: Set<String> = []
     private var reasoningViews: [String: NSTextField] = [:]
     private var reasoningButtons: [String: NSButton] = [:]
+    private var messageActivityStarted: [String: Date] = [:]
+    private var messageActivityText: [String: String] = [:]
     private var assistantFooters: [String: NSStackView] = [:]
     private var footerButtonSizes: [NSLayoutConstraint] = []
     private var feedbackButtons: [String: (NSButton, NSButton)] = [:]
@@ -395,7 +402,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     func install(_ values: [AIChatMessage]) {
         messagesStack.arrangedSubviews.forEach { messagesStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        messages.removeAll(); messageRows.removeAll(); messageContents.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); assistantFooters.removeAll(); footerButtonSizes.removeAll(); feedbackButtons.removeAll(); values.forEach(append)
+        messages.removeAll(); messageRows.removeAll(); messageContents.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); messageActivityStarted.removeAll(); messageActivityText.removeAll(); assistantFooters.removeAll(); footerButtonSizes.removeAll(); feedbackButtons.removeAll(); values.forEach(append)
     }
     func append(_ message: AIChatMessage) {
         let rendered = AIChatRenderedContentView(); rendered.translatesAutoresizingMaskIntoConstraints = false; rendered.alignment = .width
@@ -414,13 +421,17 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         if message.role == .assistant {
             let toggle = NSButton(title: "▸ 思考过程", target: self, action: #selector(toggleReasoning(_:)))
             toggle.identifier = NSUserInterfaceItemIdentifier(message.id); toggle.isBordered = false
-            toggle.font = .systemFont(ofSize: 11); toggle.contentTintColor = .secondaryLabelColor
+            toggle.font = .systemFont(ofSize: 12 * chatZoom); toggle.contentTintColor = NativeHarnessStyle.secondary
             let reasoning = NSTextField(wrappingLabelWithString: message.reasoning ?? ""); reasoning.isSelectable = true
             reasoning.font = .systemFont(ofSize: 12); reasoning.textColor = .secondaryLabelColor; reasoning.isHidden = true
             toggle.isHidden = reasoning.stringValue.isEmpty
             row.addArrangedSubview(toggle); row.addArrangedSubview(reasoning)
             reasoning.widthAnchor.constraint(equalTo: row.widthAnchor).isActive = true
             reasoningViews[message.id] = reasoning; reasoningButtons[message.id] = toggle
+            if let elapsed = message.elapsedSeconds {
+                messageActivityText[message.id] = Self.completedActivity(elapsed)
+                updateReasoningButton(id: message.id)
+            }
         }
         if let tool = message.toolEvent {
             let toggle = NSButton(title: "▸ 工具 · " + tool.name, target: self, action: #selector(toggleReasoning(_:)))
@@ -485,7 +496,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         DispatchQueue.main.async { [weak self] in self?.scrollToBottom() }
     }
     func updateMessage(id: String, content: String, renderMarkdown: Bool = false) { messageContents[id] = content; messages[id]?.setContent(content, renderMarkdown: renderMarkdown); assistantFooters[id]?.isHidden = content.isEmpty }
-    func updateReasoning(id: String, content: String) { reasoningViews[id]?.stringValue = content; reasoningButtons[id]?.isHidden = content.isEmpty }
+    func updateReasoning(id: String, content: String) { reasoningViews[id]?.stringValue = content; updateReasoningButton(id: id) }
     func updateToolEvent(id: String, event: AIChatToolEvent) {
         reasoningViews[id]?.stringValue = "输入\n" + event.arguments + (event.result.map { "\n\n结果\n" + $0 } ?? "")
         reasoningButtons[id]?.title = (reasoningViews[id]?.isHidden == false ? "▾" : "▸") + " 工具 · " + event.name + (event.isError ? "（失败）" : "")
@@ -496,7 +507,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         let widest = text.components(separatedBy: "\n").map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
         return max(hasImages ? 180 : 44, ceil(widest) + 32)
     }
-    func removeMessage(id: String) { if let row = messageRows.removeValue(forKey: id) { messagesStack.removeArrangedSubview(row); row.removeFromSuperview() }; messages.removeValue(forKey: id); messageContents.removeValue(forKey: id); userBubbleWidths.removeValue(forKey: id); userBubbleHasImages.remove(id); reasoningViews.removeValue(forKey: id); reasoningButtons.removeValue(forKey: id) }
+    func removeMessage(id: String) { if let row = messageRows.removeValue(forKey: id) { messagesStack.removeArrangedSubview(row); row.removeFromSuperview() }; messages.removeValue(forKey: id); messageContents.removeValue(forKey: id); userBubbleWidths.removeValue(forKey: id); userBubbleHasImages.remove(id); reasoningViews.removeValue(forKey: id); reasoningButtons.removeValue(forKey: id); messageActivityStarted.removeValue(forKey: id); messageActivityText.removeValue(forKey: id) }
     func setActivity(_ phase: AIChatActivityPhase, detail: String) {
         switch phase {
         case .ready, .completed: statusLabel.stringValue = ""
@@ -510,7 +521,32 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         case .failed: statusLabel.stringValue = detail
         }
     }
-    func setMessageActivity(id: String, phase: AIChatActivityPhase, identity: String) { }
+    private static func completedActivity(_ elapsed: TimeInterval) -> String {
+        let seconds = max(0, Int(elapsed))
+        return seconds >= 60 ? "已完成，用时 \(seconds / 60)分\(seconds % 60)秒" : "已完成，用时 \(seconds)秒"
+    }
+    private func updateReasoningButton(id: String) {
+        guard let button = reasoningButtons[id], let view = reasoningViews[id] else { return }
+        let hasReasoning = !view.stringValue.isEmpty
+        let text = messageActivityText[id] ?? "思考过程"
+        button.isHidden = !hasReasoning && messageActivityText[id] == nil
+        button.isEnabled = true
+        button.title = hasReasoning ? text + (view.isHidden ? "  ⌄" : "  ⌃") : text
+    }
+    func setMessageActivity(id: String, phase: AIChatActivityPhase, identity: String) {
+        switch phase {
+        case .preparing: messageActivityStarted[id] = Date(); messageActivityText[id] = "正在准备…"
+        case .uploading: messageActivityText[id] = "正在上传…"
+        case .waiting: messageActivityText[id] = "等待模型回复…"
+        case .thinking: messageActivityText[id] = "思考中…"
+        case .answering: messageActivityText[id] = "正在回复…"
+        case .completed: messageActivityText[id] = Self.completedActivity(Date().timeIntervalSince(messageActivityStarted[id] ?? Date()))
+        case .stopped: messageActivityText[id] = "已停止"
+        case .failed: messageActivityText[id] = "请求失败"
+        case .ready, .loading: break
+        }
+        updateReasoningButton(id: id)
+    }
     func setStreaming(_ streaming: Bool) {
         busy = streaming; updateSendButton(); addButton.isEnabled = !streaming
         accessButton.isEnabled = !streaming
@@ -637,7 +673,9 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     @objc private func copyMessage(_ sender: NSButton) { guard let id = sender.identifier?.rawValue, let content = messageContents[id] else { return }; NSPasteboard.general.clearContents(); NSPasteboard.general.setString(content, forType: .string) }
     @objc private func toggleReasoning(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue, let view = reasoningViews[id] else { return }
+        guard !view.stringValue.isEmpty else { return }
         view.isHidden.toggle()
+        if messageActivityText[id] != nil || assistantFooters[id] != nil { updateReasoningButton(id: id); return }
         let base = sender.title.dropFirst(2)
         sender.title = (view.isHidden ? "▸ " : "▾ ") + base
     }

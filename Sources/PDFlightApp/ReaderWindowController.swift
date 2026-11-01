@@ -1753,6 +1753,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             guard let self else { return }
             var accumulator = OpenAIStreamAccumulator()
             var currentPlaceholderID = placeholder.id
+            var turnStartedAt = Date()
             var placeholderCommitted = false
             var pendingCalls: [AIChatToolCall] = []
             var toolCardIDs: [String: String] = [:]
@@ -1869,8 +1870,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                         switch accumulator.consume(delta) {
                         case .thinking where !reportedThinking:
                             reportedThinking = true; aiSidebar.setActivity(.thinking, detail: configuration.model)
+                            aiSidebar.setMessageActivity(id: currentPlaceholderID, phase: .thinking, identity: providerIdentity)
                         case .answering where !reportedAnswering:
                             reportedAnswering = true; aiSidebar.setActivity(.answering, detail: configuration.model)
+                            aiSidebar.setMessageActivity(id: currentPlaceholderID, phase: .answering, identity: providerIdentity)
                         case .thinking, .answering, .toolCalling, .finished: break
                         }
                         if !accumulator.content.isEmpty, ProcessInfo.processInfo.systemUptime - lastRenderedAt >= 0.08 {
@@ -1883,10 +1886,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                         }
                     case .assistantCompleted(let result):
                         let saved = AIChatMessage(id: currentPlaceholderID, role: .assistant, content: result.content,
-                            createdAt: result.createdAt, reasoning: result.reasoning, toolCalls: result.toolCalls)
+                            createdAt: result.createdAt, reasoning: result.reasoning, toolCalls: result.toolCalls,
+                            elapsedSeconds: Date().timeIntervalSince(turnStartedAt))
                         aiMessages.append(saved); placeholderCommitted = true
                         aiSidebar.updateMessage(id: currentPlaceholderID, content: saved.content, renderMarkdown: true)
                         aiSidebar.updateReasoning(id: currentPlaceholderID, content: saved.reasoning ?? "")
+                        aiSidebar.setMessageActivity(id: currentPlaceholderID, phase: .completed, identity: providerIdentity)
                         pendingCalls = saved.toolCalls ?? []
                         persistAIHistory()
                     case .toolStarted(let call):
@@ -1904,8 +1909,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                             let next = AIChatMessage(role: .assistant, content: "")
                             currentPlaceholderID = next.id; activeAIPlaceholderID = next.id; placeholderCommitted = false
                             accumulator = OpenAIStreamAccumulator(); reportedThinking = false; reportedAnswering = false
+                            turnStartedAt = Date()
                             lastRenderedAt = 0; lastReasoningRenderedAt = 0
                             aiSidebar.append(next); aiSidebar.setActivity(.waiting, detail: configuration.model)
+                            aiSidebar.setMessageActivity(id: currentPlaceholderID, phase: .preparing, identity: providerIdentity)
                         }
                     }
                 }

@@ -33,7 +33,7 @@ def main():
     parser.add_argument("archive_dir", type=Path)
     parser.add_argument("recovered_dir", type=Path)
     args = parser.parse_args()
-    counters = {"sessions": 0, "reasoning blocks": 0, "tool calls": 0, "unmatched": 0}
+    counters = {"sessions": 0, "reasoning blocks": 0, "tool calls": 0, "durations": 0, "unmatched": 0}
     for history_path in (args.stage / "ai-chats").glob("*.json"):
         history = json.loads(history_path.read_text())
         changed = False
@@ -53,6 +53,19 @@ def main():
                 continue
             with zstandard.ZstdDecompressor().stream_reader(source.open("rb")) as stream:
                 records = [json.loads(line) for line in stream.read().splitlines()]
+            starts, ends, final_assistant = {}, {}, {}
+            for record in records:
+                data = record.get("data") or {}
+                turn = data.get("turn")
+                if turn is None: continue
+                if record.get("type") == "turn/start": starts[turn] = record.get("time")
+                elif record.get("type") == "turn/end" and isinstance(data.get("reason"), dict) and data["reason"].get("kind") == "completed": ends[turn] = record.get("time")
+                elif record.get("type") == "assistant/message": final_assistant[turn] = (data.get("message") or {}).get("id")
+            for turn, mid in final_assistant.items():
+                start, end, target = starts.get(turn), ends.get(turn), by_id.get(mid)
+                if target is None or not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or not 0 <= end - start <= 86_400_000: continue
+                target["elapsedSeconds"] = (end - start) / 1000
+                counters["durations"] += 1; changed = True
             ordered = [(archive_ids[m["id"]], m) for m in messages]
             tools = {}
             for record in records:

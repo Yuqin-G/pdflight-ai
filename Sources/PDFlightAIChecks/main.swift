@@ -811,6 +811,9 @@ enum PDFlightAIChecks {
             from: JSONEncoder().encode(message)
         )
         try check(roundTrip == message, "expected image data and PDF attachment name to survive portable JSON history")
+        let timed = AIChatMessage(role: .assistant, content: "done", elapsedSeconds: 65.5)
+        let restoredTimed = try JSONDecoder().decode(AIChatMessage.self, from: JSONEncoder().encode(timed))
+        try check(restoredTimed.elapsedSeconds == 65.5, "expected response duration to survive history serialization")
 
         let client = OpenAICompatibleClient()
         let configuration = AIProviderConfiguration(baseURL: "https://example.com/v1", model: "vision-model")
