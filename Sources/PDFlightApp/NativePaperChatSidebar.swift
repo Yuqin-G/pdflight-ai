@@ -105,7 +105,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var accessMode: AIChatAccessMode = .readOnly
     private var customModelTitle = "自定义模型"
     private var webConversationURL: URL?
-    private var modelPopover: NSPopover?
+    private var modelPanel: NativeModelPanel?
     private var chatZoom: CGFloat = {
         let value = UserDefaults.standard.double(forKey: "reader.nativePaperChatZoom")
         return value >= 0.8 && value <= 2.4 ? value : 1
@@ -530,13 +530,14 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     @objc private func openWebConversation() { if let webConversationURL { NSWorkspace.shared.open(webConversationURL) } }
     @objc private func configureModel() {
         guard !modelRoutes.isEmpty else { onConfigure?(); return }
-        if modelPopover?.isShown == true { modelPopover?.performClose(nil); return }
-        let popover = NSPopover(); popover.behavior = .transient; popover.animates = false
+        if modelPanel != nil { modelPanel?.dismiss(); modelPanel = nil; return }
         let controller = NativeModelPopover(routes: modelRoutes, selectedID: currentModelRouteID, effort: currentReasoningEffort,
-            customTitle: customModelTitle, chooseModel: { [weak self] in self?.onSelectModel?($0) },
-            chooseEffort: { [weak self] in self?.onSelectReasoning?($0) }, dismiss: { [weak popover] in popover?.performClose(nil) })
-        popover.contentViewController = controller; modelPopover = popover
-        popover.show(relativeTo: modelButton.bounds.offsetBy(dx: -70, dy: 0), of: modelButton, preferredEdge: .minY)
+            customTitle: customModelTitle, chooseModel: { [weak self] in self?.onSelectModel?($0); self?.focusComposer() },
+            chooseEffort: { [weak self] in self?.onSelectReasoning?($0); self?.focusComposer() }, dismiss: { [weak self] in self?.modelPanel?.dismiss() })
+        guard let parent = window else { return }
+        let panel = NativeModelPanel(controller: controller, parent: parent, anchor: modelButton)
+        panel.onDismiss = { [weak self] in self?.modelPanel = nil }
+        modelPanel = panel; panel.present()
     }
     @objc private func sendOrStop() { if busy { onCancel?(); return }; let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF else { return }; onSend?(text, attachments, selectedPreset, includePDF) }
     @objc private func attach() {

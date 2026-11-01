@@ -19,6 +19,12 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
     private var pane: Pane = .root
     private var modelRows: [NativeModelRow] = []
     private var highlightedIndex = 0
+    var onResize: ((NSSize) -> Void)?
+
+    private func resize(to size: NSSize) {
+        preferredContentSize = size
+        onResize?(size)
+    }
 
     init(routes: [HarnessModelImport.Route], selectedID: String?, effort: String?, customTitle: String?,
          chooseModel: @escaping (String) -> Void, chooseEffort: @escaping (String?) -> Void, dismiss: @escaping () -> Void) {
@@ -54,7 +60,7 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
             let effortRow = row("推理等级", value: effort ?? "默认", action: #selector(showEfforts))
             stack.addArrangedSubview(effortRow); effortRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -8).isActive = true
         }
-        preferredContentSize = NSSize(width: 260, height: current?.reasoningEfforts?.isEmpty == false ? 76 : 42)
+        resize(to: NSSize(width: 260, height: current?.reasoningEfforts?.isEmpty == false ? 76 : 42))
     }
 
     @objc private func showModels() {
@@ -107,7 +113,7 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
             list.addArrangedSubview(empty)
         }
         let height = min(360, max(75, CGFloat(list.arrangedSubviews.count * 34 + (routes.count > 4 ? 38 : 8))))
-        preferredContentSize = NSSize(width: 280, height: height)
+        resize(to: NSSize(width: 280, height: height))
         scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView)
     }
     func controlTextDidChange(_ obj: Notification) { if pane == .models { refreshModels() } }
@@ -134,7 +140,7 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
             let button = row(value, value: (value == (effort ?? "默认")) ? "✓" : "", action: #selector(pickEffort(_:)))
             button.identifier = NSUserInterfaceItemIdentifier(value); stack.addArrangedSubview(button); button.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -8).isActive = true
         }
-        preferredContentSize = NSSize(width: 260, height: CGFloat(stack.arrangedSubviews.count * 34 + 8))
+        resize(to: NSSize(width: 260, height: CGFloat(stack.arrangedSubviews.count * 34 + 8)))
     }
     private func row(_ title: String, value: String, action: Selector) -> NSButton {
         let button = NativeModelRow(title: title, value: value + (action == #selector(showModels) || action == #selector(showEfforts) ? "  ›" : ""), target: self, action: action)
@@ -147,6 +153,69 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
 }
 
 private final class NativeModelList: NSStackView { override var isFlipped: Bool { true } }
+
+/// A borderless child panel matches Harness's floating menu while retaining
+/// AppKit focus, keyboard navigation and dismissal behavior.
+@MainActor
+final class NativeModelPanel: NSPanel {
+    private weak var owner: NSWindow?
+    private weak var anchor: NSView?
+    private var clickMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    var onDismiss: (() -> Void)?
+    override var canBecomeKey: Bool { true }
+    override func cancelOperation(_ sender: Any?) { dismiss() }
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, event.keyCode == 53, !(firstResponder is NSTextView) {
+            dismiss(); return
+        }
+        super.sendEvent(event)
+    }
+
+    init(controller: NativeModelPopover, parent: NSWindow, anchor: NSView) {
+        owner = parent; self.anchor = anchor
+        super.init(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
+        isReleasedWhenClosed = false; isOpaque = false; backgroundColor = .clear
+        hasShadow = true; animationBehavior = .none
+        contentViewController = controller
+        controller.onResize = { [weak self] size in self?.position(size) }
+    }
+
+    func present() {
+        guard let owner, let controller = contentViewController else { return }
+        _ = controller.view
+        position(controller.preferredContentSize)
+        owner.addChildWindow(self, ordered: .above)
+        makeKeyAndOrderFront(nil)
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self, event.window !== self else { return event }
+            let clickedAnchor = event.window === self.owner && self.anchor.map {
+                $0.bounds.contains($0.convert(event.locationInWindow, from: nil))
+            } == true
+            self.dismiss()
+            return clickedAnchor ? nil : event
+        }
+        resignObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismiss() }
+        }
+    }
+
+    private func position(_ size: NSSize) {
+        guard let owner, let anchor, size.width > 0, size.height > 0 else { return }
+        let frame = owner.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+        let visible = owner.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? frame
+        let x = min(max(visible.minX + 4, frame.maxX + 8 - size.width), visible.maxX - size.width - 4)
+        let y = min(max(visible.minY + 4, frame.maxY + 8), visible.maxY - size.height - 4)
+        setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true)
+    }
+
+    func dismiss() {
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor); self.clickMonitor = nil }
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver); self.resignObserver = nil }
+        owner?.removeChildWindow(self); orderOut(nil)
+        let callback = onDismiss; onDismiss = nil; callback?()
+    }
+}
 
 private final class NativeModelRow: NSButton {
     private let value: String
