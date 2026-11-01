@@ -10,6 +10,7 @@ public struct OpenAICompatibleClient: Sendable {
         conversationKey: String? = nil,
         conversationTitle: String? = nil,
         currentPDFURL: URL? = nil,
+        additionalPDFURLs: [URL] = [],
         tools: [AIChatToolDefinition] = []
     ) -> AsyncThrowingStream<OpenAIStreamEvent, Error> {
         AsyncThrowingStream { continuation in
@@ -22,6 +23,7 @@ public struct OpenAICompatibleClient: Sendable {
                         conversationKey: conversationKey,
                         conversationTitle: conversationTitle,
                         currentPDFURL: currentPDFURL,
+                        additionalPDFURLs: additionalPDFURLs,
                         tools: tools
                     )
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -71,17 +73,25 @@ public struct OpenAICompatibleClient: Sendable {
         conversationKey: String? = nil,
         conversationTitle: String? = nil,
         currentPDFURL: URL? = nil,
+        additionalPDFURLs: [URL] = [],
         tools: [AIChatToolDefinition] = []
     ) throws -> URLRequest {
         let model = configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
             throw OpenAICompatibleError.invalidConfiguration("Enter a model in AI Settings.")
         }
+        let pdfURLs = ([currentPDFURL].compactMap { $0 } + additionalPDFURLs).reduce(into: [URL]()) { values, url in
+            let standardized = url.standardizedFileURL
+            if !values.contains(standardized) { values.append(standardized) }
+        }
+        guard pdfURLs.count <= 4, pdfURLs.allSatisfy({ $0.isFileURL && $0.pathExtension.lowercased() == "pdf" }) else {
+            throw OpenAICompatibleError.invalidConfiguration("最多可附加 4 个本地 PDF 文件。")
+        }
         if configuration.api != "openai-completions" {
-            return try makeAlternateRequest(messages: messages, configuration: configuration, apiKey: apiKey, currentPDFURL: currentPDFURL, tools: tools)
+            return try makeAlternateRequest(messages: messages, configuration: configuration, apiKey: apiKey, pdfURLs: pdfURLs, tools: tools)
         }
         let endpoint = try endpointURL(from: configuration.baseURL)
-        if currentPDFURL != nil {
+        if !pdfURLs.isEmpty {
             let host = endpoint.host?.lowercased() ?? ""
             guard host == "localhost" || host == "127.0.0.1" || host == "::1" else {
                 throw OpenAICompatibleError.invalidConfiguration(
@@ -107,18 +117,18 @@ public struct OpenAICompatibleClient: Sendable {
             tools: tools.isEmpty ? nil : tools.map { RequestTool(function: $0) },
             conversationKey: conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines),
             conversationTitle: conversationTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
-            pdfAttachments: currentPDFURL.map {
-                [RequestPDFAttachment(
+            pdfAttachments: pdfURLs.isEmpty ? nil : pdfURLs.map {
+                RequestPDFAttachment(
                     path: $0.standardizedFileURL.path,
                     name: $0.lastPathComponent,
                     mimeType: "application/pdf"
-                )]
+                )
             }
         ))
         return request
     }
 
-    private func makeAlternateRequest(messages: [AIChatMessage], configuration: AIProviderConfiguration, apiKey: String, currentPDFURL: URL?, tools: [AIChatToolDefinition]) throws -> URLRequest {
+    private func makeAlternateRequest(messages: [AIChatMessage], configuration: AIProviderConfiguration, apiKey: String, pdfURLs: [URL], tools: [AIChatToolDefinition]) throws -> URLRequest {
         guard ["openai-responses", "anthropic-messages"].contains(configuration.api) else {
             throw OpenAICompatibleError.invalidConfiguration("Unsupported model API: \(configuration.api)")
         }
@@ -137,13 +147,13 @@ public struct OpenAICompatibleClient: Sendable {
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let lastUserID = messages.last(where: { $0.role == .user })?.id
-        if let currentPDFURL,
-           let size = try currentPDFURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-           size > 100 * 1_024 * 1_024 {
-            throw OpenAICompatibleError.invalidConfiguration("PDF 附件超过 100 MB，请先缩小文件。")
+        let pdfFiles = try pdfURLs.map { url -> (URL, Data) in
+            if let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 100 * 1_024 * 1_024 {
+                throw OpenAICompatibleError.invalidConfiguration("PDF 附件超过 100 MB，请先缩小文件。")
+            }
+            return (url, try Data(contentsOf: url))
         }
-        let pdfData = try currentPDFURL.map { try Data(contentsOf: $0) }
-        guard pdfData == nil || lastUserID != nil else {
+        guard pdfFiles.isEmpty || lastUserID != nil else {
             throw OpenAICompatibleError.invalidConfiguration("PDF 附件需要一条用户消息。")
         }
         let encodedTools = try tools.map { tool -> [String: Any] in
@@ -176,8 +186,10 @@ public struct OpenAICompatibleClient: Sendable {
                 for image in message.imageAttachments {
                     content.append(["type": "image", "source": ["type": "base64", "media_type": image.mimeType, "data": image.data.base64EncodedString()]])
                 }
-                if message.id == lastUserID, let pdfData {
-                    content.append(["type": "document", "source": ["type": "base64", "media_type": "application/pdf", "data": pdfData.base64EncodedString()]])
+                if message.id == lastUserID {
+                    for (_, pdfData) in pdfFiles {
+                        content.append(["type": "document", "source": ["type": "base64", "media_type": "application/pdf", "data": pdfData.base64EncodedString()]])
+                    }
                 }
                 for call in message.toolCalls ?? [] {
                     let input = (try? JSONSerialization.jsonObject(with: Data(call.arguments.utf8))) as? [String: Any] ?? [:]
@@ -205,13 +217,15 @@ public struct OpenAICompatibleClient: Sendable {
                     entries.append(contentsOf: calls.map { ["type": "function_call", "call_id": $0.id, "name": $0.name, "arguments": $0.arguments] })
                     return entries
                 }
-                let includesPDF = message.id == lastUserID && pdfData != nil
+                let includesPDF = message.id == lastUserID && !pdfFiles.isEmpty
                 guard !message.imageAttachments.isEmpty || includesPDF else { return [["role": message.role.rawValue, "content": message.content]] }
                 var content: [[String: Any]] = []
                 if !message.content.isEmpty { content.append(["type": "input_text", "text": message.content]) }
                 for image in message.imageAttachments { content.append(["type": "input_image", "image_url": "data:\(image.mimeType);base64,\(image.data.base64EncodedString())"]) }
-                if includesPDF, let pdfData, let currentPDFURL {
-                    content.append(["type": "input_file", "filename": currentPDFURL.lastPathComponent, "file_data": "data:application/pdf;base64,\(pdfData.base64EncodedString())"])
+                if includesPDF {
+                    for (url, pdfData) in pdfFiles {
+                        content.append(["type": "input_file", "filename": url.lastPathComponent, "file_data": "data:application/pdf;base64,\(pdfData.base64EncodedString())"])
+                    }
                 }
                 return [["role": message.role.rawValue, "content": content]]
             }

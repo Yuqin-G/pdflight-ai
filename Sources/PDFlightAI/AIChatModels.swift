@@ -43,6 +43,7 @@ public struct AIChatSubmission: Sendable, Equatable, Identifiable {
     public var imageAttachments: [AIChatImageAttachment]
     public var promptPreset: AIPromptPreset
     public var includeCurrentPDF: Bool
+    public var additionalPDFPaths: [String]
     public let createdAt: Date
 
     public init(
@@ -51,6 +52,7 @@ public struct AIChatSubmission: Sendable, Equatable, Identifiable {
         imageAttachments: [AIChatImageAttachment] = [],
         promptPreset: AIPromptPreset,
         includeCurrentPDF: Bool = false,
+        additionalPDFPaths: [String] = [],
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -58,6 +60,7 @@ public struct AIChatSubmission: Sendable, Equatable, Identifiable {
         self.imageAttachments = imageAttachments
         self.promptPreset = promptPreset
         self.includeCurrentPDF = includeCurrentPDF
+        self.additionalPDFPaths = additionalPDFPaths
         self.createdAt = createdAt
     }
 }
@@ -99,6 +102,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
     public var content: String
     public var imageAttachments: [AIChatImageAttachment]
     public var pdfAttachmentName: String?
+    public var additionalPDFNames: [String]?
     public var reasoning: String?
     public var toolEvent: AIChatToolEvent?
     public var toolCalls: [AIChatToolCall]?
@@ -114,6 +118,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         reasoning: String? = nil,
         toolEvent: AIChatToolEvent? = nil,
         pdfAttachmentName: String? = nil,
+        additionalPDFNames: [String]? = nil,
         toolCalls: [AIChatToolCall]? = nil,
         feedback: String? = nil
     ) {
@@ -122,6 +127,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
         self.content = content
         self.imageAttachments = imageAttachments
         self.pdfAttachmentName = pdfAttachmentName
+        self.additionalPDFNames = additionalPDFNames
         self.createdAt = createdAt
         self.reasoning = reasoning
         self.toolEvent = toolEvent
@@ -130,7 +136,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName, toolCalls, feedback
+        case id, role, content, imageAttachments, createdAt, reasoning, toolEvent, pdfAttachmentName, additionalPDFNames, toolCalls, feedback
     }
 
     public init(from decoder: Decoder) throws {
@@ -143,6 +149,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
             forKey: .imageAttachments
         ) ?? []
         pdfAttachmentName = try container.decodeIfPresent(String.self, forKey: .pdfAttachmentName)
+        additionalPDFNames = try container.decodeIfPresent([String].self, forKey: .additionalPDFNames)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
         toolEvent = try container.decodeIfPresent(AIChatToolEvent.self, forKey: .toolEvent)
@@ -159,6 +166,7 @@ public struct AIChatMessage: Codable, Sendable, Equatable, Identifiable {
             try container.encode(imageAttachments, forKey: .imageAttachments)
         }
         try container.encodeIfPresent(pdfAttachmentName, forKey: .pdfAttachmentName)
+        try container.encodeIfPresent(additionalPDFNames, forKey: .additionalPDFNames)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(reasoning, forKey: .reasoning)
         try container.encodeIfPresent(toolEvent, forKey: .toolEvent)
@@ -226,8 +234,10 @@ public struct AIChatDraft: Codable, Sendable, Equatable {
     public var text: String
     public var imageAttachments: [AIChatImageAttachment]
     public var includeCurrentPDF: Bool
-    public init(text: String = "", imageAttachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false) {
+    public var additionalPDFPaths: [String]?
+    public init(text: String = "", imageAttachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false, additionalPDFPaths: [String]? = nil) {
         self.text = text; self.imageAttachments = imageAttachments; self.includeCurrentPDF = includeCurrentPDF
+        self.additionalPDFPaths = additionalPDFPaths
     }
 }
 

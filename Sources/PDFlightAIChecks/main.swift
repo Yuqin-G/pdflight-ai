@@ -491,16 +491,19 @@ enum PDFlightAIChecks {
         let anthropicDelta = try other.decode(line: "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"two\"}}")
         try check(anthropicDelta == .contentDelta("two"), "Anthropic text deltas must stream")
         let pdf = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        let secondPDF = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
         defer { try? FileManager.default.removeItem(at: pdf) }
+        defer { try? FileManager.default.removeItem(at: secondPDF) }
         try Data("pdf fixture".utf8).write(to: pdf)
-        let withFile = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425/v1", model: "mock", api: "openai-responses"), apiKey: "test", currentPDFURL: pdf)
+        try Data("another pdf fixture".utf8).write(to: secondPDF)
+        let withFile = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425/v1", model: "mock", api: "openai-responses"), apiKey: "test", currentPDFURL: pdf, additionalPDFURLs: [secondPDF, pdf])
         let fileBody = try JSONSerialization.jsonObject(with: withFile.httpBody!) as! [String: Any]
         let input = fileBody["input"] as! [[String: Any]]; let content = input.last!["content"] as! [[String: Any]]
-        try check(content.contains { $0["type"] as? String == "input_file" }, "Responses must carry the explicitly attached PDF")
-        let anthropicFile = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425", model: "mock", api: "anthropic-messages"), apiKey: "test", currentPDFURL: pdf)
+        try check(content.filter { $0["type"] as? String == "input_file" }.count == 2, "Responses must carry both PDFs and deduplicate repeated files")
+        let anthropicFile = try client.makeRequest(messages: messages, configuration: .init(baseURL: "http://127.0.0.1:3425", model: "mock", api: "anthropic-messages"), apiKey: "test", currentPDFURL: pdf, additionalPDFURLs: [secondPDF])
         let aBody = try JSONSerialization.jsonObject(with: anthropicFile.httpBody!) as! [String: Any]
         let turns = aBody["messages"] as! [[String: Any]]; let blocks = turns.last!["content"] as! [[String: Any]]
-        try check(blocks.contains { $0["type"] as? String == "document" }, "Anthropic must carry the explicitly attached PDF")
+        try check(blocks.filter { $0["type"] as? String == "document" }.count == 2, "Anthropic must carry both explicitly attached PDFs")
     }
 
     private static func validateRenderableContentFromStandardInput() throws {
@@ -819,6 +822,7 @@ enum PDFlightAIChecks {
     private static func localPDFsUseTheUniversalWebAPIAttachmentExtension() throws {
         let pdfURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("PDFlight-current-paper.pdf")
+        let secondPDFURL = FileManager.default.temporaryDirectory.appendingPathComponent("PDFlight-second-paper.pdf")
         let localConfiguration = AIProviderConfiguration(
             baseURL: "http://127.0.0.1:8199/v1",
             model: "qwen"
@@ -828,7 +832,8 @@ enum PDFlightAIChecks {
             messages: [AIChatMessage(role: .user, content: "Read this paper")],
             configuration: localConfiguration,
             apiKey: "",
-            currentPDFURL: pdfURL
+            currentPDFURL: pdfURL,
+            additionalPDFURLs: [secondPDFURL, pdfURL]
         )
         let body = try checkNotNil(request.httpBody, "expected a PDF request body")
         let JSON = try checkNotNil(
@@ -839,9 +844,18 @@ enum PDFlightAIChecks {
             JSON["pdf_attachments"] as? [[String: Any]],
             "expected the Universal Web API PDF extension"
         )
-        try check(PDFs.count == 1, "expected exactly one current PDF")
+        try check(PDFs.count == 2, "expected two distinct PDFs")
         try check(PDFs[0]["path"] as? String == pdfURL.path, "expected the local PDF path")
         try check(PDFs[0]["mime_type"] as? String == "application/pdf", "expected PDF MIME type")
+        try check(PDFs[1]["path"] as? String == secondPDFURL.path, "expected second PDF path")
+
+        do {
+            let five = (0..<5).map { FileManager.default.temporaryDirectory.appendingPathComponent("fixture-\($0).pdf") }
+            _ = try client.makeRequest(messages: [AIChatMessage(role: .user, content: "test")], configuration: localConfiguration, apiKey: "", additionalPDFURLs: five)
+            throw CheckFailure(message: "expected the four-PDF limit to be enforced")
+        } catch let error as OpenAICompatibleError {
+            guard case .invalidConfiguration = error else { throw error }
+        }
 
         do {
             _ = try client.makeRequest(

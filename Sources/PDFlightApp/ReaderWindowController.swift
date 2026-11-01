@@ -1038,8 +1038,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         navigationSidebar.translatesAutoresizingMaskIntoConstraints = false
         navigationSidebar.isHidden = !workspaceLayoutCoordinator.navigationVisible
         outlineButton.state = workspaceLayoutCoordinator.navigationVisible ? .on : .off
-        aiSidebar.onSend = { [weak self] question, attachments, preset, includePDF in
-            self?.submitAIMessage(question, attachments: attachments, preset: preset, includeCurrentPDF: includePDF)
+        aiSidebar.onSend = { [weak self] question, attachments, preset, includePDF, additionalPDFPaths in
+            self?.submitAIMessage(question, attachments: attachments, preset: preset, includeCurrentPDF: includePDF, additionalPDFPaths: additionalPDFPaths)
         }
         aiSidebar.onConfigure = { [weak self] in self?.configureAI(nil) }
         aiSidebar.onNewConversation = { [weak self] in self?.createAIConversation() }
@@ -1077,9 +1077,9 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             aiSidebar.insertPrompt(NativePaperPrompts.text(for: preset.rawValue, title: paperTitle, page: currentPage + 1, selection: selectedPDFText()))
         }
         aiSidebar.onCancel = { [weak self] in self?.aiTask?.cancel() }
-        aiSidebar.onDraftChange = { [weak self] text, images, pdf in
+        aiSidebar.onDraftChange = { [weak self] text, images, pdf, additionalPDFPaths in
             guard let self, let index = activeAIConversationIndex, let id = aiHistory?.conversations[index].id else { return }
-            let draft = AIChatDraft(text: text, imageAttachments: images, includeCurrentPDF: pdf)
+            let draft = AIChatDraft(text: text, imageAttachments: images, includeCurrentPDF: pdf, additionalPDFPaths: additionalPDFPaths)
             do { try aiChatHistoryStore.saveDraft(draft, sessionID: id, for: documentURL) }
             catch { aiSidebar.setActivity(.failed, detail: "草稿保存失败：\(error.localizedDescription)") }
             aiHistory?.conversations[index].draft = draft
@@ -1614,13 +1614,15 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         _ question: String,
         attachments: [AIChatImageAttachment] = [],
         preset: AIPromptPreset,
-        includeCurrentPDF: Bool = false
+        includeCurrentPDF: Bool = false,
+        additionalPDFPaths: [String] = []
     ) {
         let submission = AIChatSubmission(
             question: question,
             imageAttachments: attachments,
             promptPreset: preset,
-            includeCurrentPDF: includeCurrentPDF
+            includeCurrentPDF: includeCurrentPDF,
+            additionalPDFPaths: additionalPDFPaths
         )
         guard aiTask == nil, aiHistoryLoaded else {
             aiSubmissionQueue.enqueue(submission)
@@ -1662,6 +1664,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         let attachments = submission.imageAttachments
         let preset = submission.promptPreset
         let includeCurrentPDF = submission.includeCurrentPDF
+        let additionalPDFPaths = submission.additionalPDFPaths
+        let hasPDF = includeCurrentPDF || !additionalPDFPaths.isEmpty
 
         let routes = aiConfigurationStore.modelRoutes()
         let routeID = activeAIConversationIndex.flatMap { aiHistory?.conversations[$0].modelRouteID }
@@ -1682,7 +1686,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             aiSidebar.prefill(
                 question,
                 attachments: attachments,
-                includeCurrentPDF: includeCurrentPDF
+                includeCurrentPDF: includeCurrentPDF,
+                additionalPDFPaths: additionalPDFPaths
             )
             if showAISettings() {
                 startAIMessage(submission, clearComposer: clearComposer)
@@ -1699,7 +1704,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             aiSidebar.prefill(
                 question,
                 attachments: attachments,
-                includeCurrentPDF: includeCurrentPDF
+                includeCurrentPDF: includeCurrentPDF,
+                additionalPDFPaths: additionalPDFPaths
             )
             present(error: error, title: "Could not read AI settings")
             return
@@ -1710,7 +1716,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             question: question,
             template: promptTemplate,
             hasImageAttachments: !attachments.isEmpty,
-            includeCurrentPDF: includeCurrentPDF
+            includeCurrentPDF: hasPDF
         ) else { return }
         if let index = activeAIConversationIndex {
             aiHistory?.conversations[index].promptPreset = preset
@@ -1725,7 +1731,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
             role: .user,
             content: displayQuestion,
             imageAttachments: attachments,
-            pdfAttachmentName: includeCurrentPDF ? documentURL.lastPathComponent : nil
+            pdfAttachmentName: includeCurrentPDF ? documentURL.lastPathComponent : nil,
+            additionalPDFNames: additionalPDFPaths.map { URL(fileURLWithPath: $0).lastPathComponent }
         )
         if clearComposer { aiSidebar.clearComposer() }
         aiMessages.append(userMessage)
@@ -1738,8 +1745,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiSidebar.append(placeholder)
         aiSidebar.setStreaming(true)
         aiSidebar.setActivity(
-            includeCurrentPDF ? .uploading : .preparing,
-            detail: includeCurrentPDF ? documentURL.lastPathComponent : configuration.model
+            hasPDF ? .uploading : .preparing,
+            detail: hasPDF ? (includeCurrentPDF ? documentURL.lastPathComponent : URL(fileURLWithPath: additionalPDFPaths[0]).lastPathComponent) : configuration.model
         )
         aiSidebar.setMessageActivity(
             id: placeholder.id,
@@ -1852,14 +1859,15 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     try await documentEngine.text(on: page).plainText
                 }
                 let stream = AIChatAgentRunner.run(messages: requestMessages) { messages, round in
-                    let needsPDF = includeCurrentPDF && (round == 0 || conversationKey == nil)
+                    let needsPDF = hasPDF && (round == 0 || conversationKey == nil)
                     return client.streamChat(messages: messages, configuration: configuration, apiKey: apiKey,
                         conversationKey: conversationKey, conversationTitle: conversationTitle,
-                        currentPDFURL: needsPDF ? document : nil, tools: AIPaperToolRuntime.definitions)
+                        currentPDFURL: needsPDF && includeCurrentPDF ? document : nil,
+                        additionalPDFURLs: needsPDF ? additionalPDFPaths.map { URL(fileURLWithPath: $0) } : [], tools: AIPaperToolRuntime.definitions)
                 } execute: { call in
                     await AIPaperToolRuntime.execute(call, context: context)
                 }
-                aiSidebar.setActivity(includeCurrentPDF ? .uploading : .waiting, detail: configuration.model)
+                aiSidebar.setActivity(hasPDF ? .uploading : .waiting, detail: configuration.model)
                 aiSidebar.setMessageActivity(
                     id: placeholder.id,
                     phase: .waiting,
@@ -2009,7 +2017,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     content: String(message.content.suffix(remaining)),
                     imageAttachments: message.imageAttachments,
                     createdAt: message.createdAt,
-                    pdfAttachmentName: message.pdfAttachmentName
+                    pdfAttachmentName: message.pdfAttachmentName,
+                    additionalPDFNames: message.additionalPDFNames
                 ))
                 remaining = 0
             } else { break }
@@ -2116,7 +2125,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         aiSidebar.setWebConversationURL(history.conversations[index].webConversationURL)
         let draft = (try? aiChatHistoryStore.readDraft(sessionID: conversationID, for: documentURL))
             ?? history.conversations[index].draft ?? AIChatDraft()
-        aiSidebar.restoreDraft(draft.text, attachments: draft.imageAttachments, includePDF: draft.includeCurrentPDF)
+        aiSidebar.restoreDraft(draft.text, attachments: draft.imageAttachments, includePDF: draft.includeCurrentPDF, additionalPDFPaths: draft.additionalPDFPaths ?? [])
         if aiMessages.isEmpty {
             let preset = history.conversations[index].promptPreset
             let template = promptTemplate(for: preset)

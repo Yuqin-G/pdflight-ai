@@ -13,7 +13,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 440, height: 700))
         var savedText = ""; var savedImages: [AIChatImageAttachment] = []; var savedPDF = false
-        sidebar.onDraftChange = { text, images, pdf in savedText = text; savedImages = images; savedPDF = pdf }
+        sidebar.onDraftChange = { text, images, pdf, _ in savedText = text; savedImages = images; savedPDF = pdf }
         sidebar.restoreDraft("existing draft", attachments: [], includePDF: false)
         sidebar.insertQuote("[Paper · p. 2]\nquoted text\n\n")
         guard savedText == "[Paper · p. 2]\nquoted text\n\nexisting draft" else {
@@ -34,7 +34,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 11, userInfo: [NSLocalizedDescriptionKey: "图片和 PDF 附件卡片必须可见"])
         }
         var submitted = false
-        sidebar.onSend = { text, images, _, pdf in submitted = text == savedText && images == savedImages && pdf }
+        sidebar.onSend = { text, images, _, pdf, _ in submitted = text == savedText && images == savedImages && pdf }
         sidebar.sendOrStop()
         guard submitted else { throw NSError(domain: "NativePaperChatSelfCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "发送必须包含草稿和附件"]) }
         submitted = false
@@ -52,6 +52,15 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard sidebar.attachments.isEmpty, sidebar.includePDF, sidebar.composer.string == "保留文字" else {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 12, userInfo: [NSLocalizedDescriptionKey: "移除单张图片不能清除 PDF 或文字"])
         }
+        let extraPath = "/tmp/pdflight-fixture-extra.pdf"
+        sidebar.restoreDraft("附件草稿", attachments: [], includePDF: true, additionalPDFPaths: [extraPath])
+        guard sidebar.additionalPDFPaths == [extraPath], sidebar.attachmentStack.arrangedSubviews.count == 2 else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 13, userInfo: [NSLocalizedDescriptionKey: "额外 PDF 必须随草稿恢复并显示"])
+        }
+        var sentExtra: [String] = []
+        sidebar.onSend = { _, _, _, _, paths in sentExtra = paths }
+        sidebar.sendOrStop()
+        guard sentExtra == [extraPath] else { throw NSError(domain: "NativePaperChatSelfCheck", code: 14, userInfo: [NSLocalizedDescriptionKey: "发送必须包含额外 PDF"]) }
         let pdfMessage = AIChatMessage(role: .user, content: "阅读附件", pdfAttachmentName: "paper.pdf")
         sidebar.append(pdfMessage)
         let row = sidebar.messageRows[pdfMessage.id] as? NSStackView
@@ -64,7 +73,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         sidebar.feedbackButtons[answer.id]?.0.performClick(nil)
         guard feedback == "positive" else { throw NSError(domain: "NativePaperChatSelfCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "回答反馈必须能切换"]) }
     }
-    var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool) -> Void)?
+    var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool, [String]) -> Void)?
     var onConfigure: (() -> Void)?
     var onNewConversation: (() -> Void)?
     var onSelectConversation: ((String) -> Void)?
@@ -73,7 +82,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     var onCancel: (() -> Void)?
     var onResizeBy: ((CGFloat) -> Void)?
     var onResizeEnded: (() -> Void)?
-    var onDraftChange: ((String, [AIChatImageAttachment], Bool) -> Void)?
+    var onDraftChange: ((String, [AIChatImageAttachment], Bool, [String]) -> Void)?
     var onRevealCurrentHistory: (() -> Void)?
     var onPresetChange: ((AIPromptPreset) -> Void)?
     var onApplyPrompt: ((AIPromptPreset) -> Void)?
@@ -119,6 +128,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var feedbackButtons: [String: (NSButton, NSButton)] = [:]
     private var attachments: [AIChatImageAttachment] = []
     private var includePDF = false
+    private var additionalPDFPaths: [String] = []
     private var templates = NativePaperPrompts.templates
     private var selectedPreset = AIPromptPreset.reading
     private var busy = false
@@ -365,7 +375,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         rendered.setFontSize(14 * chatZoom)
         rendered.setImageAttachments(message.imageAttachments)
         let row = NSStackView(); row.orientation = .vertical; row.alignment = .leading; row.spacing = 5
-        if let pdfName = message.pdfAttachmentName, !pdfName.isEmpty {
+        for pdfName in ([message.pdfAttachmentName].compactMap { $0 } + (message.additionalPDFNames ?? [])) where !pdfName.isEmpty {
             let attachment = NSTextField(labelWithString: "▤  " + pdfName)
             attachment.font = .systemFont(ofSize: 11 * chatZoom, weight: .medium)
             attachment.textColor = .secondaryLabelColor
@@ -437,7 +447,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         } else {
             row.widthAnchor.constraint(lessThanOrEqualTo: messagesStack.widthAnchor, multiplier: 0.85).isActive = true
             row.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-            let hasAttachments = !message.imageAttachments.isEmpty || message.pdfAttachmentName != nil
+            let hasAttachments = !message.imageAttachments.isEmpty || message.pdfAttachmentName != nil || !(message.additionalPDFNames ?? []).isEmpty
             let width = row.widthAnchor.constraint(equalToConstant: bubbleWidth(for: message.content, hasImages: hasAttachments))
             width.priority = .defaultHigh; width.isActive = true; userBubbleWidths[message.id] = width
             if hasAttachments { userBubbleHasImages.insert(message.id) }
@@ -482,16 +492,16 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         if !submissions.isEmpty { statusLabel.stringValue = "排队中：\(submissions.count)" }
         else if statusLabel.stringValue.hasPrefix("排队中：") { statusLabel.stringValue = "" }
     }
-    func prefill(_ text: String, attachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false) {
-        guard composer.string.isEmpty else { return }; composer.string = text; self.attachments = attachments; includePDF = includeCurrentPDF; updateAttachments(); draftChanged()
+    func prefill(_ text: String, attachments: [AIChatImageAttachment] = [], includeCurrentPDF: Bool = false, additionalPDFPaths: [String] = []) {
+        guard composer.string.isEmpty else { return }; composer.string = text; self.attachments = attachments; includePDF = includeCurrentPDF; self.additionalPDFPaths = additionalPDFPaths; updateAttachments(); draftChanged()
     }
-    func restoreDraft(_ text: String, attachments: [AIChatImageAttachment], includePDF: Bool) {
-        suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; updateAttachments(); resizeComposer(); updateSendButton(); suppressDraftCallback = false
+    func restoreDraft(_ text: String, attachments: [AIChatImageAttachment], includePDF: Bool, additionalPDFPaths: [String] = []) {
+        suppressDraftCallback = true; composer.string = text; self.attachments = attachments; self.includePDF = includePDF; self.additionalPDFPaths = additionalPDFPaths; updateAttachments(); resizeComposer(); updateSendButton(); suppressDraftCallback = false
     }
     func insertPrompt(_ text: String) { guard !text.isEmpty else { return }; composer.string = text + (composer.string.isEmpty ? "" : "\n\n" + composer.string); draftChanged(); focusComposer() }
     func insertQuote(_ text: String) { guard !text.isEmpty else { return }; composer.string = text + composer.string; draftChanged(); focusComposer() }
     func focusComposer() { window?.makeFirstResponder(composer) }
-    func clearComposer() { composer.string = ""; attachments = []; includePDF = false; updateAttachments(); draftChanged() }
+    func clearComposer() { composer.string = ""; attachments = []; includePDF = false; additionalPDFPaths = []; updateAttachments(); draftChanged() }
     func presentHistoryMenu(_ menu: NSMenu) { menu.popUp(positioning: nil, at: .zero, in: recordButton) }
     func textDidChange(_ notification: Notification) { composer.needsDisplay = true; resizeComposer(); draftChanged() }
     private func updateComposerTypography() {
@@ -514,9 +524,9 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         return false
     }
-    private func draftChanged() { resizeComposer(); updateSendButton(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF) } }
+    private func draftChanged() { resizeComposer(); updateSendButton(); if !suppressDraftCallback { onDraftChange?(composer.string, attachments, includePDF, additionalPDFPaths) } }
     private func updateSendButton() {
-        let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF
+        let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty
         let showsStop = busy && !hasContent
         sendButton.isEnabled = busy || hasContent
         sendButton.attributedTitle = NSAttributedString(string: showsStop ? "■" : "↑", attributes: [.font: NSFont.systemFont(ofSize: showsStop ? 13 : 19, weight: .medium), .foregroundColor: hasContent || busy ? NativeHarnessStyle.primary : NativeHarnessStyle.caption])
@@ -532,6 +542,16 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             chip.wantsLayer = true; chip.layer?.cornerRadius = 6; chip.layer?.borderWidth = 0.5; chip.layer?.borderColor = NSColor.separatorColor.cgColor
             attachmentStack.addArrangedSubview(chip)
         }
+        for path in additionalPDFPaths {
+            let name = NSTextField(labelWithString: "▤  " + URL(fileURLWithPath: path).lastPathComponent); name.font = .systemFont(ofSize: 12)
+            name.lineBreakMode = .byTruncatingMiddle; name.widthAnchor.constraint(lessThanOrEqualToConstant: 180).isActive = true
+            let remove = NSButton(title: "×", target: self, action: #selector(removeAdditionalPDF(_:))); remove.isBordered = false; remove.toolTip = "移除 PDF"
+            remove.identifier = NSUserInterfaceItemIdentifier(path)
+            let chip = NSStackView(views: [name, remove]); chip.orientation = .horizontal; chip.spacing = 5
+            chip.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 5)
+            chip.wantsLayer = true; chip.layer?.cornerRadius = 6; chip.layer?.borderWidth = 0.5; chip.layer?.borderColor = NSColor.separatorColor.cgColor
+            attachmentStack.addArrangedSubview(chip)
+        }
         for image in attachments {
             let chip = AIChatImageChip(attachment: image, removable: true, removeTitle: "移除图片")
             chip.onRemove = { [weak self] in
@@ -539,7 +559,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             }
             attachmentStack.addArrangedSubview(chip)
         }
-        let hasAttachments = includePDF || !attachments.isEmpty
+        let hasAttachments = includePDF || !attachments.isEmpty || !additionalPDFPaths.isEmpty
         attachmentScroll.isHidden = !hasAttachments; attachmentHeight?.constant = hasAttachments ? 62 : 0
         attachmentStack.layoutSubtreeIfNeeded()
         let size = attachmentStack.fittingSize
@@ -599,27 +619,48 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         modelPanel = panel; panel.present()
     }
     @objc private func sendOrStop() {
-        let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF
+        let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty
         if busy && !hasContent { onCancel?(); return }
         submitDraft()
     }
-    private func submitDraft() { let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF else { return }; onSend?(text, attachments, selectedPreset, includePDF) }
+    private func submitDraft() { let text = composer.string; guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty else { return }; onSend?(text, attachments, selectedPreset, includePDF, additionalPDFPaths) }
     @objc private func attach() {
         let menu = NSMenu(); menu.addItem(withTitle: includePDF ? "移除当前 PDF" : "附加当前 PDF", action: #selector(togglePDF), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "添加图片…", action: #selector(addImage), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "添加图片或 PDF…", action: #selector(addFile), keyEquivalent: "").target = self
         if !attachments.isEmpty { menu.addItem(withTitle: "移除所有图片", action: #selector(removeImages), keyEquivalent: "").target = self }
         menu.popUp(positioning: nil, at: .zero, in: attachButton)
     }
-    @objc private func togglePDF() { includePDF.toggle(); updateAttachments(); draftChanged() }
+    @objc private func togglePDF() {
+        guard includePDF || additionalPDFPaths.count < 4 else { showAttachmentError("最多可附加 4 个 PDF。"); return }
+        includePDF.toggle(); updateAttachments(); draftChanged()
+    }
+    @objc private func removeAdditionalPDF(_ sender: NSButton) {
+        additionalPDFPaths.removeAll { $0 == sender.identifier?.rawValue }; updateAttachments(); draftChanged()
+    }
     @objc private func removeImages() { attachments = []; updateAttachments(); draftChanged() }
-    @objc private func addImage() {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true
+    private func showAttachmentError(_ text: String) { let alert = NSAlert(); alert.messageText = text; alert.runModal() }
+    @objc private func addFile() {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.image, .pdf]; panel.allowsMultipleSelection = true
         guard panel.runModal() == .OK else { return }
-        for url in panel.urls.prefix(max(0, 4 - attachments.count)) {
-            guard let data = try? Data(contentsOf: url), let type = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType else { continue }
-            attachments.append(AIChatImageAttachment(fileName: url.lastPathComponent, mimeType: type, data: data))
+        var problems: [String] = []
+        for url in panel.urls {
+            if url.pathExtension.lowercased() == "pdf" {
+                let path = url.standardizedFileURL.path
+                if additionalPDFPaths.contains(path) { continue }
+                guard additionalPDFPaths.count + (includePDF ? 1 : 0) < 4 else { problems.append("最多可附加 4 个 PDF"); continue }
+                guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 100 * 1_024 * 1_024,
+                      let handle = try? FileHandle(forReadingFrom: url) else { problems.append("无法读取或文件超过 100 MB：\(url.lastPathComponent)"); continue }
+                let header = try? handle.read(upToCount: 5); try? handle.close()
+                guard header == Data("%PDF-".utf8) else { problems.append("不是有效的 PDF：\(url.lastPathComponent)"); continue }
+                additionalPDFPaths.append(path)
+            } else {
+                guard attachments.count < 4 else { problems.append("最多可附加 4 张图片"); continue }
+                guard let data = try? Data(contentsOf: url), let type = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType else { problems.append("无法读取图片：\(url.lastPathComponent)"); continue }
+                attachments.append(AIChatImageAttachment(fileName: url.lastPathComponent, mimeType: type, data: data))
+            }
         }
         updateAttachments(); draftChanged()
+        if !problems.isEmpty { showAttachmentError(Array(Set(problems)).sorted().joined(separator: "\n")) }
     }
 }
 
