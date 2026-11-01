@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     static let customRouteID = "__pdflight_custom_model__"
     static func selfCheck() throws {
+        try NativeModelPopover.selfCheck()
         guard AIChatRenderedContentView.harnessLinkHitTestForLayoutCheck() else {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "主题链接必须保持可点击"])
         }

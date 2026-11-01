@@ -1592,7 +1592,17 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     ?? home.appendingPathComponent("Library/Application Support/dev.pdflight.reader/harness-recovery")
                 let projections = ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_PROJECTIONS"].map { URL(fileURLWithPath: $0) }
                     ?? home.appendingPathComponent(".dsh/storages/session_projcache/sessions")
-                history = try await aiChatHistoryStore.importHarnessIfNeeded(for: documentURL, dataDirectory: data, pathMappingsURL: mapping, draftDirectory: drafts, recoveredArchivesDirectory: recovered, projectionDirectory: projections)
+                // A staged native migration already contains the local copy. Read it
+                // first without reopening Harness's Documents directory; one blocked
+                // legacy import would otherwise hold the shared history actor and
+                // prevent every restored paper from displaying its conversations.
+                let historyDirectory = aiChatHistoryStore.storageDirectoryURL
+                let isNativeMigration = historyDirectory.deletingLastPathComponent().lastPathComponent.hasPrefix("native-migration-staging-")
+                if isNativeMigration && FileManager.default.fileExists(atPath: aiChatHistoryStore.fileURL(for: documentURL).path) {
+                    history = try await aiChatHistoryStore.history(for: documentURL)
+                } else {
+                    history = try await aiChatHistoryStore.importHarnessIfNeeded(for: documentURL, dataDirectory: data, pathMappingsURL: mapping, draftDirectory: drafts, recoveredArchivesDirectory: recovered, projectionDirectory: projections)
+                }
             } catch {
                 aiSidebar.setActivity(.failed, detail: "导入 Harness 对话失败：\(error.localizedDescription)。原始记录仍然保留。")
                 return

@@ -4,6 +4,30 @@ import PDFlightAI
 /// AppKit counterpart of Harness's two-level, searchable model picker.
 @MainActor
 final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
+    static func selfCheck() throws {
+        let data = #"[{"provider":"magpie","model":"qwen","name":"qwen · Web API","api":"openai-completions","baseURL":"http://localhost"},{"provider":"magpie","model":"long","name":"DeepSeek-V4.1-Flash · WorkBuddy","api":"openai-completions","baseURL":"http://localhost"},{"provider":"deepseek-account","model":"deepseek-flash","name":"DeepSeek-V4.1-Flash","api":"openai-completions","baseURL":"http://localhost"},{"provider":"magpie","model":"third","name":"chatgpt.com · Web API","api":"openai-completions","baseURL":"http://localhost"},{"provider":"magpie","model":"fourth","name":"aistudio.google.com · Web API","api":"openai-completions","baseURL":"http://localhost"}]"#.data(using: .utf8)!
+        let routes = try JSONDecoder().decode([HarnessModelImport.Route].self, from: data)
+        let picker = NativeModelPopover(routes: routes, selectedID: "magpie/qwen", effort: nil, customTitle: nil, chooseModel: { _ in }, chooseEffort: { _ in }, dismiss: {})
+        _ = picker.view
+        picker.showModels()
+        func require(_ condition: Bool, _ message: String) throws {
+            if !condition { throw NSError(domain: "NativeModelPopoverSelfCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+        }
+        try require(picker.modelRows.first?.identifier?.rawValue == "deepseek-account/deepseek-flash", "账号分组应排在 Magpie 之前")
+        try require(picker.modelRows.first?.badge == "1017", "官方 Flash 模型应显示 1017 徽标")
+        try require(picker.modelRows.first(where: { $0.identifier?.rawValue == "magpie/long" })?.badge == nil, "第三方模型不能显示官方徽标")
+        try require(picker.modelRows.filter(\.keyboardHighlighted).count == 1, "初始状态只能高亮一个模型")
+        picker.highlight(picker.modelRows[0]); picker.highlight(picker.modelRows[1])
+        try require(picker.modelRows.filter(\.keyboardHighlighted).count == 1 && picker.modelRows[1].keyboardHighlighted, "切换悬停时不得留下多个高亮")
+        let minimumWidth = ("DeepSeek-V4.1-Flash · WorkBuddy" as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width + 45
+        try require(picker.preferredContentSize.width >= minimumWidth && picker.preferredContentSize.height <= 360, "菜单尺寸必须容纳模型名称并限制高度")
+        picker.view.setFrameSize(picker.preferredContentSize); picker.view.layoutSubtreeIfNeeded()
+        try require(abs(picker.scroll.frame.width - (picker.view.frame.width - 8)) < 1 && abs(picker.scroll.frame.minX - 4) < 1, "模型列表应占满菜单宽度，不得意外缩进")
+        picker.search.stringValue = "chatgpt"; picker.refreshModels()
+        try require(picker.modelRows.count == 1 && picker.modelRows[0].identifier?.rawValue == "magpie/third", "模型搜索必须过滤列表")
+        picker.showRoot(); picker.showModels()
+        try require(picker.modelRows.count == routes.count, "重新打开模型列表应恢复全部选项")
+    }
     private enum Pane { case root, models, effort }
     private let routes: [HarnessModelImport.Route]
     private let selectedID: String?
@@ -14,11 +38,14 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
     private let dismiss: () -> Void
     private let stack = NSStackView()
     private let search = NSSearchField()
+    private let searchContainer = NSView()
     private let list = NativeModelList()
     private let scroll = NSScrollView()
     private var pane: Pane = .root
     private var modelRows: [NativeModelRow] = []
     private var highlightedIndex = 0
+    private var observingScroll = false
+    private var configuredModelsLayout = false
     var onResize: ((NSSize) -> Void)?
 
     private func resize(to size: NSSize) {
@@ -69,14 +96,35 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
         if routes.count > 4 {
             search.placeholderString = "搜索模型…"; search.isBordered = false; search.focusRingType = .none; search.font = .systemFont(ofSize: 12)
             (search.cell as? NSSearchFieldCell)?.searchButtonCell = nil
-            search.delegate = self; search.heightAnchor.constraint(equalToConstant: 30).isActive = true
-            stack.addArrangedSubview(search)
+            search.delegate = self
+            if !configuredModelsLayout {
+                search.translatesAutoresizingMaskIntoConstraints = false
+                searchContainer.addSubview(search)
+                NSLayoutConstraint.activate([
+                    searchContainer.heightAnchor.constraint(equalToConstant: 30),
+                    search.leadingAnchor.constraint(equalTo: searchContainer.leadingAnchor, constant: 7),
+                    search.trailingAnchor.constraint(equalTo: searchContainer.trailingAnchor, constant: -7),
+                    search.centerYAnchor.constraint(equalTo: searchContainer.centerYAnchor)
+                ])
+            }
+            stack.addArrangedSubview(searchContainer)
+            searchContainer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -8).isActive = true
         }
         list.orientation = .vertical; list.alignment = .width; list.spacing = 0
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.contentView.postsBoundsChangedNotifications = true
+        if !observingScroll {
+            NotificationCenter.default.addObserver(self, selector: #selector(scrollDidChange), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+            observingScroll = true
+        }
         scroll.documentView = list; list.translatesAutoresizingMaskIntoConstraints = false
-        list.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor).isActive = true
+        if !configuredModelsLayout {
+            list.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor).isActive = true
+            configuredModelsLayout = true
+        }
         stack.addArrangedSubview(scroll)
+        scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -8).isActive = true
         refreshModels()
         if routes.count > 4 { view.window?.makeFirstResponder(search) }
     }
@@ -85,14 +133,14 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
         modelRows.removeAll(); highlightedIndex = 0
         let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let sorted = routes.sorted { a, b in
-            func order(_ id: String) -> Int { switch id { case "magpie": return 0; case "magpie-responses": return 1; case "magpie-anthropic": return 2; default: return 3 } }
+            func order(_ id: String) -> Int { switch id { case "deepseek-account": return 0; case "magpie": return 1; case "magpie-responses": return 2; case "magpie-anthropic": return 3; default: return 4 } }
             let x = order(a.provider), y = order(b.provider)
             return x == y ? (a.provider == b.provider ? false : a.provider < b.provider) : x < y
         }
         var lastProvider: String?
         for route in sorted where query.isEmpty || route.name.localizedCaseInsensitiveContains(query) || route.provider.localizedCaseInsensitiveContains(query) {
             if lastProvider != route.provider {
-                let fallback = ["magpie": "Magpie", "magpie-responses": "Magpie · Responses", "magpie-anthropic": "Magpie · Anthropic"]
+                let fallback = ["deepseek-account": "DeepSeek 账号", "magpie": "Magpie", "magpie-responses": "Magpie · Responses", "magpie-anthropic": "Magpie · Anthropic"]
                 let label = NSTextField(labelWithString: route.providerName ?? fallback[route.provider] ?? route.provider)
                 label.font = .systemFont(ofSize: 11); label.textColor = NativeHarnessStyle.secondary
                 let wrap = NSView(); wrap.addSubview(label); label.translatesAutoresizingMaskIntoConstraints = false
@@ -102,7 +150,17 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
             let button = row(route.name, value: route.id == selectedID ? "✓" : "", action: #selector(pickModel(_:)))
             button.identifier = NSUserInterfaceItemIdentifier(route.id); button.isEnabled = route.isSupported
             list.addArrangedSubview(button); button.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true
-            if button.isEnabled, let modelRow = button as? NativeModelRow { modelRows.append(modelRow) }
+            if button.isEnabled, let modelRow = button as? NativeModelRow {
+                if ["deepseek-account", "deepseek-official"].contains(route.provider), route.model == "deepseek-flash", route.name == "DeepSeek-V4.1-Flash" {
+                    modelRow.badge = "1017"
+                }
+                modelRow.tracksListHighlight = true
+                modelRow.pointerEntered = { [weak self, weak modelRow] in
+                    guard let self, let modelRow else { return }
+                    self.highlight(modelRow)
+                }
+                modelRows.append(modelRow)
+            }
         }
         if selectedID == NativePaperChatSidebar.customRouteID, let customTitle {
             let button = row(customTitle, value: "✓", action: #selector(pickModel(_:)))
@@ -112,16 +170,32 @@ final class NativeModelPopover: NSViewController, NSSearchFieldDelegate {
             let empty = NSTextField(labelWithString: "没有找到模型"); empty.textColor = .secondaryLabelColor; empty.font = .systemFont(ofSize: 12)
             list.addArrangedSubview(empty)
         }
+        if !modelRows.isEmpty {
+            highlightedIndex = modelRows.firstIndex(where: { $0.identifier?.rawValue == selectedID }) ?? 0
+            modelRows[highlightedIndex].keyboardHighlighted = true
+        }
         let height = min(360, max(75, CGFloat(list.arrangedSubviews.count * 34 + (routes.count > 4 ? 38 : 8))))
-        resize(to: NSSize(width: 280, height: height))
+        let font = NSFont.systemFont(ofSize: 13)
+        let textWidth = modelRows.map { ($0.title as NSString).size(withAttributes: [.font: font]).width + ($0.badge == nil ? 0 : 45) }.max() ?? 0
+        resize(to: NSSize(width: min(420, max(240, ceil(textWidth) + 55)), height: height))
         scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView)
     }
+    private func highlight(_ row: NativeModelRow) {
+        guard let index = modelRows.firstIndex(of: row) else { return }
+        highlightedIndex = index
+        for item in modelRows { item.keyboardHighlighted = item === row }
+    }
+    private func highlightPointerRowIfPresent() {
+        guard let row = modelRows.first(where: { $0.pointerIsInside }) else { return }
+        highlight(row)
+    }
+    @objc private func scrollDidChange() { highlightPointerRowIfPresent() }
     func controlTextDidChange(_ obj: Notification) { if pane == .models { refreshModels() } }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard pane == .models else { return false }
         if commandSelector == #selector(NSResponder.moveDown(_:)) || commandSelector == #selector(NSResponder.moveUp(_:)) {
             guard !modelRows.isEmpty else { return true }
-            modelRows[highlightedIndex].keyboardHighlighted = false
+            modelRows.forEach { $0.keyboardHighlighted = false }
             let delta = commandSelector == #selector(NSResponder.moveDown(_:)) ? 1 : -1
             highlightedIndex = (highlightedIndex + delta + modelRows.count) % modelRows.count
             modelRows[highlightedIndex].keyboardHighlighted = true; modelRows[highlightedIndex].scrollToVisible(modelRows[highlightedIndex].bounds)
@@ -220,8 +294,13 @@ final class NativeModelPanel: NSPanel {
 
 private final class NativeModelRow: NSButton {
     private let value: String
-    private var hovered = false
+    var badge: String?
+    var pointerEntered: (() -> Void)?
+    var tracksListHighlight = false
     var keyboardHighlighted = false { didSet { needsDisplay = true } }
+    var pointerIsInside: Bool {
+        window.map { $0.isKeyWindow && visibleRect.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
+    }
     init(title: String, value: String, target: AnyObject, action: Selector) {
         self.value = value
         super.init(frame: .zero)
@@ -234,15 +313,25 @@ private final class NativeModelRow: NSButton {
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect], owner: self, userInfo: nil))
         super.updateTrackingAreas()
     }
-    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    override func mouseEntered(with event: NSEvent) { pointerEntered?(); needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
-        if (hovered || keyboardHighlighted) && isEnabled { NSColor.selectedContentBackgroundColor.withAlphaComponent(0.09).setFill(); NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 1), xRadius: 8, yRadius: 8).fill() }
+        let highlighted = tracksListHighlight ? keyboardHighlighted : (pointerIsInside || keyboardHighlighted)
+        if highlighted && isEnabled { NSColor.labelColor.withAlphaComponent(0.06).setFill(); NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 1), xRadius: 6, yRadius: 6).fill() }
         let font = NSFont.systemFont(ofSize: 13), paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingTail
         let textColor = isEnabled ? NativeHarnessStyle.primary : NSColor.disabledControlTextColor
         let valueWidth = min(bounds.width * 0.68, (value as NSString).size(withAttributes: [.font: font]).width + 4)
-        let textRect = NSRect(x: 8, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 20 - valueWidth), height: 18)
+        let badgeWidth: CGFloat = badge == nil ? 0 : 44
+        let textRect = NSRect(x: 8, y: (bounds.height - 18) / 2, width: max(0, bounds.width - 20 - valueWidth - badgeWidth), height: 18)
         (title as NSString).draw(in: textRect, withAttributes: [.font: font, .foregroundColor: textColor, .paragraphStyle: paragraph])
+        if let badge {
+            let titleWidth = min(textRect.width, (title as NSString).size(withAttributes: [.font: font]).width)
+            let badgeRect = NSRect(x: textRect.minX + titleWidth + 4, y: (bounds.height - 19) / 2, width: 40, height: 19)
+            NSColor.systemOrange.withAlphaComponent(0.10).setFill()
+            NSBezierPath(roundedRect: badgeRect, xRadius: 9, yRadius: 9).fill()
+            let badgeStyle = NSMutableParagraphStyle(); badgeStyle.alignment = .center
+            (badge as NSString).draw(in: badgeRect.insetBy(dx: 0, dy: 2), withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemOrange, .paragraphStyle: badgeStyle])
+        }
         paragraph.alignment = .right
         (value as NSString).draw(in: NSRect(x: bounds.width - valueWidth - 8, y: textRect.minY, width: valueWidth, height: 18), withAttributes: [.font: font, .foregroundColor: NativeHarnessStyle.secondary, .paragraphStyle: paragraph])
     }
