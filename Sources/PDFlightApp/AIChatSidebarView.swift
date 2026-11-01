@@ -2015,15 +2015,22 @@ final class AIChatRenderedContentView: NSStackView {
     }
 
     private static func harnessSoftBreaks(_ text: String) -> String {
-        // Preserve multiline display equations for the math renderer.
-        guard !text.contains("$$"), !text.contains("\\[") else { return text }
         let lines = text.components(separatedBy: "\n")
         guard lines.count > 1 else { return text }
         var result = ""
+        var inDisplayMath = false
         for index in lines.indices {
             var line = lines[index]
             if index < lines.count - 1 {
-                if line.hasSuffix("  ") { line.removeLast(2); result += line + "\n" }
+                let wasInDisplayMath = inDisplayMath
+                if line.components(separatedBy: "$$").count % 2 == 0 { inDisplayMath.toggle() }
+                if line.contains("\\[") { inDisplayMath = true }
+                if line.contains("\\]") { inDisplayMath = false }
+                let next = lines[index + 1].trimmingCharacters(in: .whitespaces)
+                if wasInDisplayMath || inDisplayMath || line.contains("$$") || line.contains("\\[") || line.contains("\\]") || next.hasPrefix("$$") || next.hasPrefix("\\[") {
+                    result += line + "\n"
+                }
+                else if line.hasSuffix("  ") { line.removeLast(2); result += line + "\n" }
                 else if line.hasSuffix("\\") { line.removeLast(); result += line + "\n" }
                 else { result += line + " " }
             } else { result += line }

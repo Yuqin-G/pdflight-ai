@@ -16,6 +16,14 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard markdown.renderedTextForLayoutCheck().contains("论文中的描述： 在论文中提到。") else {
             throw NSError(domain: "NativePaperChatSelfCheck", code: 19, userInfo: [NSLocalizedDescriptionKey: "Markdown 段落中的软换行必须与 Harness 一致"])
         }
+        markdown.setContent("**具体数值**：\n在论文中给出：\n$$\nx=1\n$$", renderMarkdown: true)
+        guard markdown.renderedTextForLayoutCheck().contains("具体数值： 在论文中给出："), markdown.renderedMathLatexForLayoutCheck().contains("x=1") else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 20, userInfo: [NSLocalizedDescriptionKey: "软换行不能影响独立公式"])
+        }
+        markdown.setContent("第一行  \n第二行", renderMarkdown: true)
+        guard markdown.renderedTextForLayoutCheck().contains("第一行\n第二行") else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 21, userInfo: [NSLocalizedDescriptionKey: "Markdown 硬换行必须保留"])
+        }
         let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 440, height: 700))
         var savedText = ""; var savedImages: [AIChatImageAttachment] = []; var savedPDF = false
         sidebar.onDraftChange = { text, images, pdf, _, _, _ in savedText = text; savedImages = images; savedPDF = pdf }
