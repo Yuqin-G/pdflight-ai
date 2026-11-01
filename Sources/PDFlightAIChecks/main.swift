@@ -29,7 +29,7 @@ enum PDFlightAIChecks {
             var sessions = 0, messages = 0, drafts = 0
             for target in result.targets {
                 let history = try await store.importHarnessIfNeeded(for: target.documentURL, dataDirectory: data, pathMappingsURL: result.mappingsURL,
-                    draftDirectory: support.appendingPathComponent("harness-draft-import"), recoveredArchivesDirectory: support.appendingPathComponent("harness-recovery"),
+                    draftDirectory: ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_DRAFT_DIRECTORY"].map { URL(fileURLWithPath: $0) } ?? support.appendingPathComponent("harness-draft-import"), recoveredArchivesDirectory: support.appendingPathComponent("harness-recovery"),
                     projectionDirectory: home.appendingPathComponent(".dsh/storages/session_projcache/sessions"))
                 sessions += history.conversations.count
                 messages += history.conversations.reduce(0) { $0 + $1.messages.count }
