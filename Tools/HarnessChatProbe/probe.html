@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="design-platform.css">
+  <link rel="stylesheet" href="base.css">
+  <link rel="stylesheet" href="gradient-shadow-text.css">
+  <link rel="stylesheet" href="scrollbar.css">
+  <link rel="stylesheet" href="pdf-reading.css">
+  <link rel="stylesheet" href="assets/__VENDOR_CSS__">
+  <link rel="stylesheet" href="assets/__INDEX_CSS__">
+  <style>
+    html, body, #root { height: 100%; margin: 0; overflow: hidden; }
+    #root { display: flex; flex-direction: column; }
+    body { --dsh-content-font-size: 14px; --dsh-code-font-size: 12px; }
+    [data-chat-node-key] { content-visibility: auto; contain-intrinsic-size: auto 300px; }
+    .md-table-wide { overflow-x: auto !important; max-width: 100%; }
+    #chat-body [data-chat-node-key] { padding-inline: 24px; }
+  </style>
+</head>
+<body>
+  <script>
+    window.__errors = [];
+    window.addEventListener('error', e => window.__errors.push(e.message || 'resource'), true);
+    window.addEventListener('unhandledrejection', e => window.__errors.push(String(e.reason)));
+  </script>
+  <div id="root"></div>
+  <script src="test-history.js"></script>
+  <script type="module" src="probe.js"></script>
+</body>
+</html>

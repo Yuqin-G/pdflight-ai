@@ -2,8 +2,7 @@ import AppKit
 import PDFlightAI
 import UniformTypeIdentifiers
 
-/// Native paper conversation. The conversation engine, history, and draft
-/// persistence are owned by PDFlight; no WebKit view is used here.
+/// Native paper conversation. The engine, history and drafts are owned by PDFlight.
 @MainActor
 final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     static let customRouteID = "__pdflight_custom_model__"
@@ -31,7 +30,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
                 throw NSError(domain: "NativePaperChatSelfCheck", code: 28, userInfo: [NSLocalizedDescriptionKey: "消息首字必须保留字形绘制空间"])
             }
         }
-        let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 440, height: 700))
+        let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 440, height: 700), harnessPreviewEnabled: false)
         var savedText = ""; var savedImages: [AIChatImageAttachment] = []; var savedPDF = false
         sidebar.onDraftChange = { text, images, pdf, _, _, _ in savedText = text; savedImages = images; savedPDF = pdf }
         sidebar.restoreDraft("existing draft", attachments: [], includePDF: false)
@@ -122,6 +121,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             if let savedZoom { UserDefaults.standard.set(savedZoom, forKey: "reader.nativePaperChatZoom") }
             else { UserDefaults.standard.removeObject(forKey: "reader.nativePaperChatZoom") }
         }
+        try harnessComposerLayoutCheck()
         let layoutWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
         layoutWindow.contentView = sidebar
         defer { layoutWindow.contentView = nil }
@@ -159,6 +159,91 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             let commitDuration = Date().timeIntervalSince(start)
             print(String(format: "Zoom benchmark (20 messages, 20 events): rebuild %.3fs, preview %.3fs, final reflow %.3fs", rebuildDuration, previewDuration, commitDuration))
         }
+        // Optional performance probe using a real exported native history. The
+        // original synthetic benchmark doesn't exercise long formulas and its
+        // preview loop does not force the layout work done by a visible window.
+        if let path = ProcessInfo.processInfo.environment["PDFLIGHT_BENCHMARK_CHAT_FILE"] {
+            let object = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any]
+            let conversations = object?["conversations"] as? [[String: Any]] ?? []
+            let selected = conversations.first(where: { $0["id"] as? String == object?["activeConversationID"] as? String }) ?? conversations.first
+            let input = selected?["messages"] as? [[String: Any]] ?? []
+            let probe = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 680, height: 950))
+            let window = NSWindow(contentRect: probe.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            let container = NSView(frame: probe.frame); window.contentView = container
+            probe.translatesAutoresizingMaskIntoConstraints = false; container.addSubview(probe)
+            NSLayoutConstraint.activate([
+                probe.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                probe.topAnchor.constraint(equalTo: container.topAnchor),
+                probe.widthAnchor.constraint(equalToConstant: 680),
+                probe.heightAnchor.constraint(equalToConstant: 950)
+            ])
+            for item in input {
+                guard let text = item["content"] as? String, let name = item["role"] as? String, let role = AIChatRole(rawValue: name) else { continue }
+                probe.append(AIChatMessage(role: role, content: text))
+            }
+            probe.setChatZoom(1); probe.layoutSubtreeIfNeeded(); window.displayIfNeeded(); probe.scrollToBottom()
+            guard abs(probe.bounds.width - 680) < 1 else {
+                throw NSError(domain: "NativePaperChatSelfCheck", code: 29, userInfo: [NSLocalizedDescriptionKey: "真实性能测试必须使用固定的聊天栏宽度"])
+            }
+            var timings: [Double] = []
+            for _ in 0..<20 {
+                let start = Date()
+                probe.previewChatZoomChange(1.25, phase: .changed)
+                probe.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+                timings.append(Date().timeIntervalSince(start))
+            }
+            let start = Date(); probe.previewChatZoomChange(0, phase: .ended); probe.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            print(String(format: "Real chat zoom: %d messages, 20 frames %.3fs, max %.3fs, commit %.3fs", input.count, timings.reduce(0,+), timings.max() ?? 0, Date().timeIntervalSince(start)))
+        }
+    }
+    private static func harnessComposerLayoutCheck() throws {
+        let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 680, height: 950), harnessPreviewEnabled: true)
+        let window = NSWindow(contentRect: sidebar.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = sidebar
+        defer { sidebar.close(); window.contentView = nil }
+        for scale: CGFloat in [0.8, 1, 1.4, 2.4] {
+            sidebar.setChatZoom(scale)
+            sidebar.layoutSubtreeIfNeeded()
+            let card = sidebar.composerCard.convert(sidebar.composerCard.bounds, to: sidebar)
+            let text = sidebar.composerScroll.convert(sidebar.composerScroll.bounds, to: sidebar.composerCard)
+            let sizes: [(CGFloat, CGFloat)] = [
+                (card.minX, 16), (card.width, 680 - 39),
+                (card.height, 98), (sidebar.composerCard.layer?.cornerRadius ?? 0, 14),
+                (text.minX, 14), (text.height, 32),
+                (sidebar.attachButton.frame.width, 28), (sidebar.attachButton.frame.height, 28),
+                (sidebar.sendButton.frame.width, 34), (sidebar.sendButton.frame.height, 34),
+                (sidebar.composer.font?.pointSize ?? 0, 14)
+            ]
+            guard sizes.allSatisfy({ abs($0.0 - $0.1) <= 0.6 }) else {
+                throw NSError(domain: "NativePaperChatSelfCheck", code: 30, userInfo: [NSLocalizedDescriptionKey: "阅读缩放不能改变输入框尺寸: \(scale), \(sizes)"])
+            }
+        }
+        let narrow = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 320, height: 950), harnessPreviewEnabled: true)
+        let narrowWindow = NSWindow(contentRect: narrow.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        narrowWindow.contentView = narrow
+        defer { narrow.close(); narrowWindow.contentView = nil }
+        narrow.setChatZoom(2.4); narrow.layoutSubtreeIfNeeded()
+        guard !narrow.composerToolbarWrapped,
+              [narrow.attachButton, narrow.accessButton, narrow.modelButton, narrow.sendButton].allSatisfy({ button in
+                  let rect = button.convert(button.bounds, to: narrow.composerCard)
+                  return rect.minX >= -0.6 && rect.maxX <= narrow.composerCard.bounds.width + 0.6
+              }) else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 32, userInfo: [NSLocalizedDescriptionKey: "320pt 窄窗口放大正文时输入框按钮必须保持默认大小且可用"])
+        }
+        sidebar.setChatZoom(1)
+        let reference = AIChatDraftReference(source: "reference", ref: "@paper.pdf", offset: 3, length: 10, label: "paper.pdf", appearance: "file", clipboardText: "@paper.pdf")
+        sidebar.restoreDraft("草稿 @paper.pdf", attachments: [], includePDF: true, references: [reference])
+        var sent = false
+        sidebar.onSend = { text, _, _, pdf, _, references in sent = text == "草稿 @paper.pdf" && pdf && references == [reference] }
+        sidebar.sendOrStop()
+        guard sent, !sidebar.attachmentScroll.isHidden else {
+            throw NSError(domain: "NativePaperChatSelfCheck", code: 31, userInfo: [NSLocalizedDescriptionKey: "Harness 视觉对齐不能丢失原生草稿、引用或 PDF 附件"])
+        }
+        if let path = ProcessInfo.processInfo.environment["PDFLIGHT_COMPOSER_LAYOUT_SNAPSHOT"], let bitmap = sidebar.bitmapImageRepForCachingDisplay(in: sidebar.bounds) {
+            sidebar.cacheDisplay(in: sidebar.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        }
+        print("PASS: Composer remains 98px with fixed 14pt text, insets and controls at 80/100/140/240% reading zoom; native draft/reference/PDF send preserved")
     }
     var onSend: ((String, [AIChatImageAttachment], AIPromptPreset, Bool, [String], [AIChatDraftReference]) -> Void)?
     var onConfigure: (() -> Void)?
@@ -189,6 +274,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private let recordButton = NativePaperToolbarButton(title: "▤", target: nil, action: nil)
     private let webButton = NativePaperToolbarButton(title: "↗", target: nil, action: nil)
     private let messagesScroll = NativePaperChatScrollView()
+    // Temporary opt-in rendering preview; input and execution remain native.
+    private let harnessPreview: HarnessChatPreview?
     private let messagesStack = NativePaperMessageStack()
     private var messagesWidthConstraint: NSLayoutConstraint?
     private let composerCard = NSView()
@@ -198,10 +285,21 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private let composerScroll = NSScrollView()
     private let composer = NativePaperComposer()
     private var composerHeight: NSLayoutConstraint?
-    private let attachButton = NSButton(title: "+", target: nil, action: nil)
+    private let attachButton = NativePaperComposerButton(title: "+", target: nil, action: nil)
     private let modelButton = NSButton(title: "选择模型 ▾", target: nil, action: nil)
     private let accessButton = NSButton(title: "仅可查看 ▾", target: nil, action: nil)
-    private let sendButton = NSButton(title: "↑", target: nil, action: nil)
+    private let sendButton = NativePaperComposerButton(title: "↑", target: nil, action: nil)
+    // Reading zoom changes the transcript only; composer controls stay at 100%.
+    private let composerZoom: CGFloat = 1
+    private var composerLayoutConstraints: [(NSLayoutConstraint, CGFloat)] = []
+    private var composerFooter: NSStackView?
+    private var composerBottom: NSStackView?
+    private var composerLeftTools: NSStackView?
+    private var composerRightTools: NSStackView?
+    private var composerToolSpacer: NSView?
+    private var composerFooterHeight: NSLayoutConstraint?
+    private var composerModelTitle = "选择模型"
+    private var composerToolbarWrapped = false
     private let statusLabel = NSTextField(labelWithString: "")
     private let resizeHandle = NativePaperChatResizeHandle()
     private var messages: [String: AIChatRenderedContentView] = [:]
@@ -258,6 +356,12 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private static let accent = NSColor(srgbRed: 217/255, green: 119/255, blue: 87/255, alpha: 1)
 
     override init(frame: NSRect) {
+        harnessPreview = ProcessInfo.processInfo.environment["PDFLIGHT_HARNESS_PREVIEW"] != "0" ? HarnessChatPreview() : nil
+        super.init(frame: frame)
+        setup()
+    }
+    private init(frame: NSRect, harnessPreviewEnabled: Bool) {
+        harnessPreview = harnessPreviewEnabled ? HarnessChatPreview() : nil
         super.init(frame: frame)
         setup()
     }
@@ -266,6 +370,17 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = Self.background.cgColor }
+        if harnessPreview != nil { updateHarnessComposerGeometry() }
+    }
+
+    /// Keep the default native layout intact; these constants mirror the original
+    /// InputBar and embedded ConversationContent only in the Harness preview.
+    private func composerConstraint(_ constraint: NSLayoutConstraint, harnessValue: CGFloat) -> NSLayoutConstraint {
+        if harnessPreview != nil {
+            composerLayoutConstraints.append((constraint, harnessValue))
+            constraint.constant = harnessValue * composerZoom
+        }
+        return constraint
     }
 
     private func setup() {
@@ -340,7 +455,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         composerCard.layer?.borderWidth = 0.5; composerCard.layer?.borderColor = NSColor.separatorColor.cgColor
         effectiveAppearance.performAsCurrentDrawingAppearance { composerCard.layer?.backgroundColor = NativeHarnessStyle.input.cgColor }
         composerScroll.drawsBackground = false; composerScroll.hasVerticalScroller = true; composerScroll.autohidesScrollers = true
-        composer.isRichText = false; composer.drawsBackground = false; composer.font = .systemFont(ofSize: 14 * chatZoom)
+        composer.isRichText = false; composer.drawsBackground = false; composer.font = .systemFont(ofSize: 14 * composerZoom)
         composer.textContainerInset = NSSize(width: 7, height: 4); composer.delegate = self
         composer.isVerticallyResizable = true; composer.isHorizontallyResizable = false
         composer.textContainer?.widthTracksTextView = true
@@ -364,10 +479,33 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         sendButton.isBordered = false; sendButton.target = self; sendButton.action = #selector(sendOrStop)
         updateSendButton()
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let footer = NSStackView(views: [attachButton, accessButton, spacer, modelButton, sendButton])
+        let footer: NSStackView
+        if harnessPreview != nil {
+            let leftFill = NSView(); leftFill.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            let rightFill = NSView(); rightFill.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            let left = NSStackView(views: [attachButton, accessButton, leftFill])
+            let right = NSStackView(views: [rightFill, modelButton, sendButton])
+            left.setCustomSpacing(0, after: accessButton)
+            right.setCustomSpacing(0, after: rightFill)
+            for group in [left, right] {
+                group.orientation = .horizontal; group.alignment = .centerY
+                group.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+            }
+            composerLeftTools = left; composerRightTools = right; composerToolSpacer = spacer
+            footer = NSStackView(views: [left, spacer, right])
+        } else {
+            footer = NSStackView(views: [attachButton, accessButton, spacer, modelButton, sendButton])
+        }
         footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 6
-        attachButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        sendButton.widthAnchor.constraint(equalToConstant: 34).isActive = true
+        composerConstraint(attachButton.widthAnchor.constraint(equalToConstant: 28), harnessValue: 28).isActive = true
+        composerConstraint(sendButton.widthAnchor.constraint(equalToConstant: 34), harnessValue: 34).isActive = true
+        if harnessPreview != nil {
+            composerConstraint(attachButton.heightAnchor.constraint(equalToConstant: 28), harnessValue: 28).isActive = true
+            composerConstraint(sendButton.heightAnchor.constraint(equalToConstant: 34), harnessValue: 34).isActive = true
+            composerConstraint(accessButton.heightAnchor.constraint(equalToConstant: 28), harnessValue: 28).isActive = true
+            composerConstraint(modelButton.heightAnchor.constraint(equalToConstant: 28), harnessValue: 28).isActive = true
+        }
+        composerFooter = footer
         for button in [attachButton, accessButton, sendButton] { button.setContentCompressionResistancePriority(.required, for: .horizontal) }
         modelButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         attachmentStack.orientation = .horizontal; attachmentStack.alignment = .centerY; attachmentStack.spacing = 8
@@ -378,51 +516,166 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         composerCard.addSubview(attachmentScroll); composerCard.addSubview(composerScroll); composerCard.addSubview(footer)
         let attachmentHeight = attachmentScroll.heightAnchor.constraint(equalToConstant: 0); attachmentHeight.isActive = true; self.attachmentHeight = attachmentHeight
         let height = composerScroll.heightAnchor.constraint(equalToConstant: 36); height.isActive = true; composerHeight = height
+        let toolbarHeight = composerConstraint(footer.heightAnchor.constraint(equalToConstant: 34), harnessValue: 34)
+        composerFooterHeight = toolbarHeight
         NSLayoutConstraint.activate([
-            attachmentScroll.topAnchor.constraint(equalTo: composerCard.topAnchor, constant: 6),
-            attachmentScroll.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 12),
-            attachmentScroll.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -12),
-            composerScroll.topAnchor.constraint(equalTo: attachmentScroll.bottomAnchor),
-            composerScroll.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 5),
-            composerScroll.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -5),
-            footer.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 8),
-            footer.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -8),
-            footer.topAnchor.constraint(equalTo: composerScroll.bottomAnchor, constant: 8), footer.bottomAnchor.constraint(equalTo: composerCard.bottomAnchor, constant: -7),
-            footer.heightAnchor.constraint(equalToConstant: 34)
+            composerConstraint(attachmentScroll.topAnchor.constraint(equalTo: composerCard.topAnchor, constant: 6), harnessValue: 8),
+            composerConstraint(attachmentScroll.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 12), harnessValue: 12),
+            composerConstraint(attachmentScroll.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -12), harnessValue: -12),
+            composerConstraint(composerScroll.topAnchor.constraint(equalTo: attachmentScroll.bottomAnchor), harnessValue: 4),
+            composerConstraint(composerScroll.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 5), harnessValue: 14),
+            composerConstraint(composerScroll.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -5), harnessValue: -12),
+            composerConstraint(footer.leadingAnchor.constraint(equalTo: composerCard.leadingAnchor, constant: 8), harnessValue: 8),
+            composerConstraint(footer.trailingAnchor.constraint(equalTo: composerCard.trailingAnchor, constant: -8), harnessValue: -8),
+            composerConstraint(footer.topAnchor.constraint(equalTo: composerScroll.bottomAnchor, constant: 8), harnessValue: 14),
+            composerConstraint(footer.bottomAnchor.constraint(equalTo: composerCard.bottomAnchor, constant: -7), harnessValue: -6),
+            toolbarHeight
         ])
         statusLabel.font = .systemFont(ofSize: 10); statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
-        let bottom = NSStackView(views: [composerCard, statusLabel]); bottom.orientation = .vertical
+        let composerSeat: NSView
+        if harnessPreview != nil {
+            // The embedded body reserves a 5px scrollbar plus its 2px edge gap.
+            // InputBar adds 8px clearance and its 100%-16px cap on both sides.
+            let host = NSView()
+            composerCard.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(composerCard)
+            let preferredWidth = composerConstraint(composerCard.widthAnchor.constraint(equalTo: host.widthAnchor, constant: -39), harnessValue: -39)
+            preferredWidth.priority = .defaultHigh
+            NSLayoutConstraint.activate([
+                composerCard.topAnchor.constraint(equalTo: host.topAnchor),
+                composerCard.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+                composerConstraint(composerCard.centerXAnchor.constraint(equalTo: host.centerXAnchor, constant: -3.5), harnessValue: -3.5),
+                preferredWidth,
+                composerConstraint(composerCard.widthAnchor.constraint(lessThanOrEqualToConstant: 952), harnessValue: 952)
+            ])
+            statusLabel.isHidden = true
+            composerSeat = host
+        } else {
+            composerSeat = composerCard
+        }
+        let bottom = NSStackView(views: [composerSeat, statusLabel]); bottom.orientation = .vertical
+        composerBottom = bottom
         bottom.alignment = .width; bottom.spacing = 5; bottom.edgeInsets = NSEdgeInsets(top: 5, left: 10, bottom: 8, right: 10)
-        let stack = NSStackView(views: [top, divider(), prompts, divider(), messagesScroll, bottom])
+        let visibleMessages: NSView = harnessPreview ?? messagesScroll
+        let stack = NSStackView(views: [top, divider(), prompts, divider(), visibleMessages, bottom])
         stack.orientation = .vertical; stack.alignment = .width; stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false; addSubview(stack)
         NSLayoutConstraint.activate([stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor), stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor)])
-        for view in [top, prompts, messagesScroll, bottom] {
+        for view in [top, prompts, visibleMessages, bottom] {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         messagesScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        visibleMessages.setContentHuggingPriority(.defaultLow, for: .vertical)
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false; addSubview(resizeHandle)
         NSLayoutConstraint.activate([resizeHandle.leadingAnchor.constraint(equalTo: leadingAnchor), resizeHandle.topAnchor.constraint(equalTo: topAnchor), resizeHandle.bottomAnchor.constraint(equalTo: bottomAnchor), resizeHandle.widthAnchor.constraint(equalToConstant: 5)])
         resizeHandle.onDrag = { [weak self] in self?.onResizeBy?($0) }; resizeHandle.onEnd = { [weak self] in self?.onResizeEnded?() }
         setPromptTemplates(NativePaperPrompts.templates, selectedPreset: .reading)
+        harnessPreview?.onZoomChanged = { [weak self] value in
+            guard let self, abs(self.chatZoom - value) >= 0.001 else { return }
+            self.setChatZoom(value)
+        }
+        harnessPreview?.setZoom(chatZoom)
+        if harnessPreview != nil { updateHarnessComposerGeometry(); resizeComposer() }
+    }
+
+    private func updateHarnessComposerGeometry() {
+        guard harnessPreview != nil else { return }
+        let scale = composerZoom
+        for (constraint, value) in composerLayoutConstraints { constraint.constant = value * scale }
+        composerCard.layer?.cornerRadius = 14 * scale // claude-warm-theme panel token
+        composerCard.layer?.borderWidth = 0.5 * scale
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            composerCard.layer?.backgroundColor = NativeHarnessStyle.input.cgColor
+            let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            composerCard.layer?.borderColor = (dark ? NSColor(srgbRed: 245/255, green: 239/255, blue: 230/255, alpha: 31/255) : NSColor(srgbRed: 31/255, green: 29/255, blue: 25/255, alpha: 26/255)).cgColor
+        }
+        composerBottom?.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 8 * scale, right: 0)
+        composerBottom?.spacing = 0
+        composer.textContainerInset = .zero
+        composer.textContainer?.lineFragmentPadding = 0
+        composer.harnessZoom = scale
+        composer.textColor = NativeHarnessStyle.primary
+        composer.insertionPointColor = NSColor(srgbRed: 196/255, green: 96/255, blue: 63/255, alpha: 1)
+        attachButton.harnessAppearance = .attach
+        sendButton.harnessAppearance = .send
+        attachButton.harnessZoom = scale; sendButton.harnessZoom = scale
+        accessButton.symbolConfiguration = .init(pointSize: 13 * scale, weight: .regular)
+        attachmentStack.spacing = 8 * scale
+        statusLabel.font = .systemFont(ofSize: 10 * scale)
+        updateComposerTypography()
+        updateSendButton()
+        updateHarnessComposerToolbar()
+        if includePDF || !attachments.isEmpty || !additionalPDFPaths.isEmpty { updateAttachments() }
+    }
+
+    /// Match the original permission query and model compaction before allowing
+    /// the trailing group to wrap; keep every action reachable in narrow panes.
+    private func updateHarnessComposerToolbar() {
+        guard harnessPreview != nil, let footer = composerFooter else { return }
+        let scale = composerZoom
+        let width = max(0, min(bounds.width / scale - 39, 952) - 16)
+        let gap: CGFloat = width <= 560 ? 8 : 12
+        composerLeftTools?.spacing = gap * scale
+        composerRightTools?.spacing = gap * scale
+        let compactPermission = width <= 460
+        let permission = compactPermission ? " ▾" : accessMode.title + " ▾"
+        if accessButton.title != permission || abs((accessButton.font?.pointSize ?? 0) - 13 * scale) > 0.001 {
+            accessButton.font = .systemFont(ofSize: 13 * scale)
+            accessButton.attributedTitle = NSAttributedString(string: permission, attributes: [.font: NSFont.systemFont(ofSize: 13 * scale), .foregroundColor: NativeHarnessStyle.secondary])
+        }
+        accessButton.setAccessibilityLabel(accessMode.title)
+        let permissionWidth: CGFloat = compactPermission ? 40 : (accessMode.title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width + 36
+        let desiredModelWidth = min(360, min(width * 0.45, (composerModelTitle as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width + 28))
+        let compactModel = 28 + permissionWidth + desiredModelWidth + 34 + 3 * gap > width
+        let modelTitle = compactModel ? " ▾" : composerModelTitle + " ▾"
+        if modelButton.title != modelTitle || abs((modelButton.font?.pointSize ?? 0) - 13 * scale) > 0.001 {
+            modelButton.font = .systemFont(ofSize: 13 * scale)
+            modelButton.attributedTitle = NSAttributedString(string: modelTitle, attributes: [.font: NSFont.systemFont(ofSize: 13 * scale), .foregroundColor: NativeHarnessStyle.secondary])
+        }
+        modelButton.image = compactModel ? NSImage(systemSymbolName: "square.stack.3d.up", accessibilityDescription: nil) : nil
+        modelButton.symbolConfiguration = .init(pointSize: 13 * scale, weight: .regular)
+        modelButton.contentTintColor = NativeHarnessStyle.secondary
+        modelButton.imagePosition = .imageLeading
+        modelButton.setAccessibilityLabel(composerModelTitle)
+        let wrapped = 28 + permissionWidth + 32 + 34 + 3 * gap > width
+        if wrapped != composerToolbarWrapped {
+            composerToolbarWrapped = wrapped
+            footer.orientation = wrapped ? .vertical : .horizontal
+            footer.alignment = wrapped ? .width : .centerY
+            composerToolSpacer?.isHidden = wrapped
+        }
+        footer.spacing = (wrapped ? 12 : gap) * scale
+        composerFooterHeight?.constant = (wrapped ? 74 : 34) * scale
+    }
+
+    override func layout() {
+        updateHarnessComposerToolbar()
+        super.layout()
     }
 
     private func divider() -> NSView { let view = NSBox(); view.boxType = .separator; return view }
     func setPaperTitle(_ title: String) { paperTitle = title; if includePDF { updateAttachments() } }
     func setReferenceDirectory(_ directory: URL) { referenceDirectory = directory }
-    func activate() { }
-    func close() { modelPanel?.dismiss(); modelPanel = nil }
+    func activate() { harnessPreview?.activate() }
+    func close() { harnessPreview?.close(); modelPanel?.dismiss(); modelPanel = nil }
     func setModelTitle(_ title: String) {
-        modelButton.attributedTitle = NSAttributedString(string: title.isEmpty ? "选择模型 ▾" : title + " ▾", attributes: [.font: NSFont.systemFont(ofSize: 13 * chatZoom), .foregroundColor: NativeHarnessStyle.primary])
+        composerModelTitle = title.isEmpty ? "选择模型" : title
+        if harnessPreview != nil { updateHarnessComposerToolbar(); return }
+        modelButton.attributedTitle = NSAttributedString(string: title.isEmpty ? "选择模型 ▾" : title + " ▾", attributes: [.font: NSFont.systemFont(ofSize: 13 * composerZoom), .foregroundColor: harnessPreview == nil ? NativeHarnessStyle.primary : NativeHarnessStyle.secondary])
     }
     func setAccessMode(_ mode: AIChatAccessMode) {
         accessMode = mode
-        accessButton.attributedTitle = NSAttributedString(string: mode.title + " ▾", attributes: [.font: NSFont.systemFont(ofSize: 13 * chatZoom), .foregroundColor: NativeHarnessStyle.primary])
-        accessButton.contentTintColor = NativeHarnessStyle.primary
+        if harnessPreview != nil { updateHarnessComposerToolbar(); return }
+        accessButton.attributedTitle = NSAttributedString(string: mode.title + " ▾", attributes: [.font: NSFont.systemFont(ofSize: 13 * composerZoom), .foregroundColor: harnessPreview == nil ? NativeHarnessStyle.primary : NativeHarnessStyle.secondary])
+        accessButton.contentTintColor = harnessPreview == nil ? NativeHarnessStyle.primary : NativeHarnessStyle.secondary
     }
     private func previewChatZoomChange(_ delta: CGFloat, phase: NSEvent.Phase) {
         guard delta.isFinite else { return }
+        if harnessPreview != nil {
+            if delta != 0 { setChatZoom(chatZoom * exp(delta * 0.004)) }
+            return
+        }
         if delta != 0 {
             let next = min(2.4, max(0.8, (previewChatZoom ?? chatZoom) * exp(delta * 0.004)))
             previewChatZoom = next
@@ -473,6 +726,8 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private func setChatZoom(_ value: CGFloat) {
         guard value.isFinite else { return }
         chatZoom = min(2.4, max(0.8, value))
+        if harnessPreview != nil { updateHarnessComposerGeometry() }
+        harnessPreview?.setZoom(chatZoom)
         zoomButton.title = "\(Int((chatZoom * 100).rounded()))%"; zoomButton.isHidden = abs(chatZoom - 1) < 0.005
         zoomWidth?.constant = zoomButton.isHidden ? 0 : 40
         UserDefaults.standard.set(Double(chatZoom), forKey: "reader.nativePaperChatZoom")
@@ -532,10 +787,12 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         if let index = templates.firstIndex(where: { $0.id == selectedPreset.rawValue }) { presetPopup.selectItem(at: index) }
     }
     func install(_ values: [AIChatMessage]) {
+        harnessPreview?.replace([])
         messagesStack.arrangedSubviews.forEach { messagesStack.removeArrangedSubview($0); $0.removeFromSuperview() }
         messages.removeAll(); messageRows.removeAll(); messageContents.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); messageActivityStarted.removeAll(); messageActivityText.removeAll(); assistantFooters.removeAll(); footerButtonSizes.removeAll(); feedbackButtons.removeAll(); values.forEach(append)
     }
     func append(_ message: AIChatMessage) {
+        harnessPreview?.append(message)
         let rendered = AIChatRenderedContentView(); rendered.translatesAutoresizingMaskIntoConstraints = false; rendered.alignment = .width
         rendered.useHarnessTypography()
         rendered.setContent(message.content, renderMarkdown: message.role == .assistant)
@@ -626,19 +883,20 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         messages[message.id] = rendered; messageRows[message.id] = row; messageContents[message.id] = message.content
         DispatchQueue.main.async { [weak self] in self?.scrollToBottom() }
     }
-    func updateMessage(id: String, content: String, renderMarkdown: Bool = false) { messageContents[id] = content; messages[id]?.setContent(content, renderMarkdown: renderMarkdown); assistantFooters[id]?.isHidden = content.isEmpty }
-    func updateReasoning(id: String, content: String) { reasoningViews[id]?.stringValue = content; updateReasoningButton(id: id) }
+    func updateMessage(id: String, content: String, renderMarkdown: Bool = false) { harnessPreview?.update(id: id, content: content); messageContents[id] = content; messages[id]?.setContent(content, renderMarkdown: renderMarkdown); assistantFooters[id]?.isHidden = content.isEmpty }
+    func updateReasoning(id: String, content: String) { harnessPreview?.updateReasoning(id: id, content: content); reasoningViews[id]?.stringValue = content; updateReasoningButton(id: id) }
     func updateToolEvent(id: String, event: AIChatToolEvent) {
+        harnessPreview?.updateTool(id: id, event: event)
         reasoningViews[id]?.stringValue = "输入\n" + event.arguments + (event.result.map { "\n\n结果\n" + $0 } ?? "")
         reasoningButtons[id]?.title = (reasoningViews[id]?.isHidden == false ? "▾" : "▸") + " 工具 · " + event.name + (event.isError ? "（失败）" : "")
     }
-    func setToolActivity(_ name: String) { statusLabel.stringValue = "正在调用 \(name)…" }
+    func setToolActivity(_ name: String) { statusLabel.stringValue = "正在调用 \(name)…"; if harnessPreview != nil { statusLabel.isHidden = false } }
     private func bubbleWidth(for text: String, hasImages: Bool) -> CGFloat {
         let font = NSFont.systemFont(ofSize: 14 * chatZoom)
         let widest = text.components(separatedBy: "\n").map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
         return max(hasImages ? 180 : 44, ceil(widest) + 32)
     }
-    func removeMessage(id: String) { if let row = messageRows.removeValue(forKey: id) { messagesStack.removeArrangedSubview(row); row.removeFromSuperview() }; messages.removeValue(forKey: id); messageContents.removeValue(forKey: id); userBubbleWidths.removeValue(forKey: id); userBubbleHasImages.remove(id); reasoningViews.removeValue(forKey: id); reasoningButtons.removeValue(forKey: id); messageActivityStarted.removeValue(forKey: id); messageActivityText.removeValue(forKey: id) }
+    func removeMessage(id: String) { harnessPreview?.remove(id: id); if let row = messageRows.removeValue(forKey: id) { messagesStack.removeArrangedSubview(row); row.removeFromSuperview() }; messages.removeValue(forKey: id); messageContents.removeValue(forKey: id); userBubbleWidths.removeValue(forKey: id); userBubbleHasImages.remove(id); reasoningViews.removeValue(forKey: id); reasoningButtons.removeValue(forKey: id); messageActivityStarted.removeValue(forKey: id); messageActivityText.removeValue(forKey: id) }
     func setActivity(_ phase: AIChatActivityPhase, detail: String) {
         switch phase {
         case .ready, .completed: statusLabel.stringValue = ""
@@ -651,6 +909,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         case .stopped: statusLabel.stringValue = "已停止"
         case .failed: statusLabel.stringValue = detail
         }
+        if harnessPreview != nil { statusLabel.isHidden = statusLabel.stringValue.isEmpty }
     }
     private static func completedActivity(_ elapsed: TimeInterval) -> String {
         let seconds = max(0, Int(elapsed))
@@ -731,8 +990,9 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         return true
     }
     private func updateComposerTypography() {
-        let font = NSFont.systemFont(ofSize: 14 * chatZoom)
-        let style = NSMutableParagraphStyle(); style.minimumLineHeight = 24 * chatZoom
+        let font = NSFont.systemFont(ofSize: 14 * composerZoom)
+        let style = NSMutableParagraphStyle(); style.minimumLineHeight = 24 * composerZoom
+        if harnessPreview != nil { style.maximumLineHeight = 24 * composerZoom }
         composer.font = font; composer.defaultParagraphStyle = style
         composer.typingAttributes = [.font: font, .paragraphStyle: style, .foregroundColor: NativeHarnessStyle.primary]
         composer.placeholderFont = font
@@ -741,7 +1001,13 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard let container = composer.textContainer, let layout = composer.layoutManager else { return }
         layout.ensureLayout(for: container)
         let height = layout.usedRect(for: container).height + composer.textContainerInset.height * 2
-        composerHeight?.constant = min(336 * chatZoom, max(36 * chatZoom, ceil(height)))
+        if harnessPreview != nil {
+            // The CSS input's 4px top pad is a separate constraint; this is its
+            // remaining 32px floor inside the original 36px input box.
+            composerHeight?.constant = min(332 * composerZoom, max(32 * composerZoom, ceil(height)))
+        } else {
+            composerHeight?.constant = min(336 * composerZoom, max(36 * composerZoom, ceil(height)))
+        }
     }
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         if (slashMenuOpen || referenceMenuOpen), let event = NSApp.currentEvent, let menu = composerMenuPanel?.contentViewController as? NativeComposerMenu {
@@ -774,6 +1040,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         let hasContent = !composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || includePDF || !additionalPDFPaths.isEmpty
         let showsStop = busy && !hasContent
         sendButton.isEnabled = busy || hasContent
+        sendButton.showsStop = showsStop
         sendButton.attributedTitle = NSAttributedString(string: showsStop ? "■" : "↑", attributes: [.font: NSFont.systemFont(ofSize: showsStop ? 13 : 19, weight: .medium), .foregroundColor: hasContent || busy ? NativeHarnessStyle.primary : NativeHarnessStyle.caption])
     }
     private func updateAttachments() {
@@ -799,16 +1066,33 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         }
         for image in attachments {
             let chip = AIChatImageChip(attachment: image, removable: true, removeTitle: "移除图片", showsToolTips: false)
+            if harnessPreview != nil {
+                func scaleChip(_ view: NSView) {
+                    for constraint in view.constraints { constraint.constant *= composerZoom }
+                    view.layer?.cornerRadius *= composerZoom
+                    view.subviews.forEach(scaleChip)
+                }
+                scaleChip(chip)
+            }
             chip.onRemove = { [weak self] in
                 self?.attachments.removeAll { $0.id == image.id }; self?.updateAttachments(); self?.draftChanged()
             }
             attachmentStack.addArrangedSubview(chip)
         }
         let hasAttachments = includePDF || !attachments.isEmpty || !additionalPDFPaths.isEmpty
-        attachmentScroll.isHidden = !hasAttachments; attachmentHeight?.constant = hasAttachments ? 62 : 0
+        let scale: CGFloat = composerZoom
+        if harnessPreview != nil {
+            for chip in attachmentStack.arrangedSubviews.compactMap({ $0 as? NSStackView }) {
+                chip.spacing = 5 * scale
+                chip.edgeInsets = NSEdgeInsets(top: 7 * scale, left: 8 * scale, bottom: 7 * scale, right: 5 * scale)
+                chip.arrangedSubviews.compactMap { $0 as? NSTextField }.forEach { $0.font = .systemFont(ofSize: 12 * scale) }
+                chip.layer?.cornerRadius = 6 * scale
+            }
+        }
+        attachmentScroll.isHidden = !hasAttachments; attachmentHeight?.constant = hasAttachments ? 62 * scale : 0
         attachmentStack.layoutSubtreeIfNeeded()
         let size = attachmentStack.fittingSize
-        attachmentStack.frame = NSRect(x: 0, y: 0, width: max(size.width, attachmentScroll.contentSize.width), height: 62)
+        attachmentStack.frame = NSRect(x: 0, y: 0, width: max(size.width, attachmentScroll.contentSize.width), height: 62 * scale)
     }
     private func scrollToBottom() { let clip = messagesScroll.contentView; let h = messagesStack.frame.height; clip.scroll(to: NSPoint(x: 0, y: max(0, h - clip.bounds.height))); messagesScroll.reflectScrolledClipView(clip) }
     @objc private func addConversation() { onNewConversation?() }
@@ -1033,9 +1317,62 @@ private final class NativePaperTab: NSStackView {
     }
 }
 
+/// The preview keeps native button actions and accessibility while drawing the
+/// original warm-theme circular controls instead of AppKit's text-only chrome.
+private final class NativePaperComposerButton: NSButton {
+    enum Appearance { case attach, send }
+    var harnessAppearance: Appearance? { didSet { needsDisplay = true } }
+    var harnessZoom: CGFloat = 1 { didSet { needsDisplay = true } }
+    var showsStop = false { didSet { needsDisplay = true } }
+    private var hovered = false
+    override var wantsDefaultClipping: Bool { harnessAppearance == nil }
+    override func updateTrackingAreas() {
+        trackingAreas.forEach(removeTrackingArea)
+        if harnessAppearance != nil {
+            addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect], owner: self, userInfo: nil))
+        }
+        super.updateTrackingAreas()
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    override func draw(_ dirtyRect: NSRect) {
+        guard let appearance = harnessAppearance else { super.draw(dirtyRect); return }
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let scale = harnessZoom
+        let translated = appearance == .send ? bounds.offsetBy(dx: 0, dy: (isFlipped ? -2 : 2) * scale) : bounds
+        let fill: NSColor
+        if appearance == .send {
+            fill = dark
+                ? NSColor(srgbRed: hovered && isEnabled ? 226/255 : 217/255, green: hovered && isEnabled ? 144/255 : 119/255, blue: hovered && isEnabled ? 111/255 : 87/255, alpha: isEnabled ? 1 : 0.4)
+                : NSColor(srgbRed: hovered && isEnabled ? 163/255 : 196/255, green: hovered && isEnabled ? 78/255 : 96/255, blue: hovered && isEnabled ? 51/255 : 63/255, alpha: isEnabled ? 1 : 0.4)
+        } else {
+            fill = dark ? NSColor(srgbRed: 46/255, green: 43/255, blue: 38/255, alpha: isEnabled ? 1 : 0.5) : NSColor(srgbRed: 243/255, green: 241/255, blue: 234/255, alpha: isEnabled ? 1 : 0.5)
+        }
+        fill.setFill(); NSBezierPath(ovalIn: translated).fill()
+        let color = appearance == .send ? NSColor.white.withAlphaComponent(isEnabled ? 1 : 0.4) : NativeHarnessStyle.primary.withAlphaComponent(isEnabled ? 1 : 0.5)
+        color.setStroke(); color.setFill()
+        let c = NSPoint(x: translated.midX, y: translated.midY)
+        if appearance == .send && showsStop {
+            NSBezierPath(roundedRect: NSRect(x: c.x - 4 * scale, y: c.y - 4 * scale, width: 8 * scale, height: 8 * scale), xRadius: scale, yRadius: scale).fill()
+        } else {
+            let path = NSBezierPath(); path.lineWidth = 1.5 * scale; path.lineCapStyle = .round; path.lineJoinStyle = .round
+            if appearance == .attach {
+                path.move(to: NSPoint(x: c.x - 5 * scale, y: c.y)); path.line(to: NSPoint(x: c.x + 5 * scale, y: c.y))
+                path.move(to: NSPoint(x: c.x, y: c.y - 5 * scale)); path.line(to: NSPoint(x: c.x, y: c.y + 5 * scale))
+            } else {
+                let sign: CGFloat = isFlipped ? -1 : 1
+                path.move(to: NSPoint(x: c.x, y: c.y - 5 * sign * scale)); path.line(to: NSPoint(x: c.x, y: c.y + 5 * sign * scale))
+                path.move(to: NSPoint(x: c.x - 4 * scale, y: c.y + sign * scale)); path.line(to: NSPoint(x: c.x, y: c.y + 5 * sign * scale)); path.line(to: NSPoint(x: c.x + 4 * scale, y: c.y + sign * scale))
+            }
+            path.stroke()
+        }
+    }
+}
+
 private final class NativePaperComposer: NSTextView {
     var onImages: (([AIChatImageAttachment]) -> Void)?
     var placeholderFont = NSFont.systemFont(ofSize: 14)
+    var harnessZoom: CGFloat?
 
     override func paste(_ sender: Any?) {
         let images = Self.readImages(NSPasteboard.general)
@@ -1077,9 +1414,14 @@ private final class NativePaperComposer: NSTextView {
         super.draw(dirtyRect)
         guard string.isEmpty else { return }
         let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingTail
+        if let scale = harnessZoom { paragraph.minimumLineHeight = 24 * scale; paragraph.maximumLineHeight = 24 * scale }
         let attributes: [NSAttributedString.Key: Any] = [.font: placeholderFont, .foregroundColor: NativeHarnessStyle.caption, .paragraphStyle: paragraph]
         let placeholder = "发消息或创建任务, / 调用指令, @ 文件或对话" as NSString
-        placeholder.draw(in: NSRect(x: textContainerInset.width + 5, y: textContainerInset.height, width: max(0, bounds.width - 28), height: 24), withAttributes: attributes)
+        if let scale = harnessZoom {
+            placeholder.draw(in: NSRect(x: 0, y: 0, width: bounds.width, height: 24 * scale), withAttributes: attributes)
+        } else {
+            placeholder.draw(in: NSRect(x: textContainerInset.width + 5, y: textContainerInset.height, width: max(0, bounds.width - 28), height: 24), withAttributes: attributes)
+        }
     }
 }
 

@@ -1,0 +1,3 @@
+
+# Preserve whitespace inside bundled third-party JavaScript string literals.
+Resources/HarnessChat/assets/* -whitespace

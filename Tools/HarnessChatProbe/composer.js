@@ -1,0 +1,26 @@
+import './assets/pdflight-static.js';
+const components = {};
+window.__ModuleLoader__ = {load(def){components[def.id] = def.factory(name => {if(!(name in window.__PD_STATIC__)) throw new Error('Missing '+name);return window.__PD_STATIC__[name]})}};
+for(const name of ['dsh-client-ui-chat','dsh-client-ui-model-selection','dsh-client-ui-conversation']) await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src=name+'.js';s.onload=resolve;s.onerror=reject;document.head.append(s)});
+const React=window.__PD_STATIC__.react, root=window.__PD_STATIC__['react-dom/client'].createRoot(document.getElementById('root'));
+const Assistant=components['@deepseek-ai/dsh-client-ui-chat'].PDComponent;
+const conv=components['@deepseek-ai/dsh-client-ui-conversation'];
+let submitted;
+const shell=new conv.PDShell({defaultSink:async(text)=>{submitted=text;return {kind:'success'}}});
+const dictionary=conv.PDLocale; const tr=(key)=>dictionary[key]??key;
+const useInput=fn=>React.useSyncExternalStore(shell.state.subscribe,()=>fn(shell.state.getSnapshot()));
+const model=components['@deepseek-ai/dsh-client-ui-model-selection'];
+const modelState={status:'ready',groups:[{id:'magpie',name:'Magpie',models:[{id:'qwen',name:'qwen · Web API'},{id:'chatgpt',name:'chatgpt.com · Web API'},{id:'ai',name:'aistudio.google.com · Web API'},{id:'swe',name:'SWE-2 · Devin'},{id:'hy3',name:'Hy3 · WorkBuddy'}]}],current:{provider:'magpie',model:'qwen'},failures:[],error:null,pending:null};
+const directory={subscribe:()=>()=>{},getSnapshot:()=>modelState};
+const modelT=(k)=>model.PDLocale[k]??k;
+const modelNode=React.createElement(model.PDComponent,{locked:false,available:true,directory,load:async()=>{},select:async()=>{},t:modelT,renderSlot:()=>null});
+const props={useSession:fn=>fn({running:false,subagent:null,removed:false,promptError:null}),useInput,inputActions:shell.actions,keyboard:shell,stop:()=>{},t:tr,renderSlot:(name)=>name==='conversation.input.model'?modelNode:null,useBusyEnter:fn=>fn('queue'),useFileUploads:fn=>fn({}),useNotices:fn=>fn(null),useLexicon:fn=>fn(new Map()),useMenuLauncher:fn=>fn(null),useStopShortcut:fn=>fn([]),useProjection:(key,fn)=>fn?fn(undefined):undefined,sessionId:'local',variant:'composer'};
+root.render(React.createElement(React.Fragment,null,React.createElement(conv.PDComponent,props),React.createElement(Assistant,{blocks:[{kind:'text',text:'# 测试原版组件\n\n一段文字，包含公式 $E=mc^2$。\n\n- 第一项\n- 第二项'}],streaming:false,loadImage:()=>Promise.resolve(null),renderSlot:()=>null,useDisclosure:()=>[false,()=>{}],usePresentation:fn=>fn({}),useGroupAction:()=>()=>{},t:k=>k})));
+window.__checkLiteralSubmission=async()=>{
+  const original='  第一行\n第二行  ';
+  shell.actions.setDraft(original);
+  await new Promise(resolve=>setTimeout(resolve,100));
+  shell.submit('queue');
+  await new Promise(resolve=>setTimeout(resolve,100));
+  return {matches:submitted===original,actualLength:submitted?.length??-1,expectedLength:original.length};
+};

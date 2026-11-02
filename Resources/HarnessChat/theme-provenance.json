@@ -1,0 +1,57 @@
+{
+  "package": "@deepseek-ai/dsh-client-ui-theme",
+  "version": "0.2.1-rc.5",
+  "archiveSha256": "8dad52f295bdbe9fa71948fdf38ac2ce3c910213d3b89c37174b2af77db9fb31",
+  "modulePath": "dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js",
+  "moduleSha256": "e94b6aad08ca1e9399341fdfcc7c5ff20d093fae4e86894bcf151bee6a832a07",
+  "styles": [
+    {
+      "name": "base.css",
+      "variable": "base_css_default",
+      "bytes": 1249,
+      "sha256": "77d5487e7f9cf7597d8b15f1b598598658d970f0cdb4a513c9a93c2f450aa77e"
+    },
+    {
+      "name": "corner-shape.css",
+      "variable": "corner_shape_css_default",
+      "bytes": 141,
+      "sha256": "b3ef70d30ee48289413e753be96b56a1e3273115d8123cc22105504dbd38ebe7"
+    },
+    {
+      "name": "design-platform.css",
+      "variable": "design_platform_css_default",
+      "bytes": 19081,
+      "sha256": "f04a03df7d266e4859959ceddcff12c5a58ff9c9972e80c8b10d2184376a833e"
+    },
+    {
+      "name": "focus.css",
+      "variable": "focus_css_default",
+      "bytes": 298,
+      "sha256": "77bcbea3e42c33667afa8e835bf798cc9bbc4bdcd0d37e796423af9dbd9bbded"
+    },
+    {
+      "name": "onboarding.css",
+      "variable": "onboarding_css_default",
+      "bytes": 869,
+      "sha256": "d321e1903c77ba69cfc2ba7c077504efda2fc2b3ee3d8cf4797a6746fe23224e"
+    },
+    {
+      "name": "scrollbar.css",
+      "variable": "scrollbar_css_default",
+      "bytes": 838,
+      "sha256": "7457fa7bcde76d19981125c94c0a8afd7d83b1dac3f72bd418597bda35297c5b"
+    },
+    {
+      "name": "gradient-shadow-text.css",
+      "variable": "gradient_shadow_text_css_default",
+      "bytes": 12175,
+      "sha256": "814dee95539b2f719e22e6e22812d5b9d22fe620ad6ddd457b0303ea2e69d2c8"
+    },
+    {
+      "name": "shiki.css",
+      "variable": "shiki_css_default",
+      "bytes": 705,
+      "sha256": "71deb2de951ab101ef23e584e4ea588c27d5cbfc4f3cdc8707bcf99243dac7e7"
+    }
+  ]
+}

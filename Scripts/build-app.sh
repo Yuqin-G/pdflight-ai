@@ -20,6 +20,7 @@ mkdir -p "$STAGING_APP/Contents/MacOS" "$STAGING_APP/Contents/Resources" "$PROJE
 cp "$BIN_DIR/PDFlight" "$STAGING_APP/Contents/MacOS/PDFlight"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$STAGING_APP/Contents/Info.plist"
 cp "$PROJECT_ROOT/Resources/PDFlight.icns" "$STAGING_APP/Contents/Resources/PDFlight.icns"
+cp -R "$PROJECT_ROOT/Resources/HarnessChat" "$STAGING_APP/Contents/Resources/HarnessChat"
 for resource_bundle in "$BIN_DIR"/*.bundle(N); do
     cp -R "$resource_bundle" "$STAGING_APP/Contents/Resources/"
 done
@@ -28,14 +29,22 @@ if [[ -d "$UWA_HOME" && -d "$UWA_HOME/.venv" ]]; then
     RSYNC_EXCLUDES=(
         --exclude '.env' --exclude 'logs/' --exclude '__pycache__/'
         --exclude '*.pyc' --exclude '*.sqlite3' --exclude '*.sqlite3-*'
+        --exclude 'request_history.json' --exclude 'app_stats.json'
+        --exclude 'model_name_overrides.local.json' --exclude 'chrome_profile/'
         --exclude 'bin/' --exclude 'pyvenv.cfg'
     )
     mkdir -p "$STAGING_APP/Contents/Resources/uwa-lite"
     rsync -a "${RSYNC_EXCLUDES[@]}" \
         "$UWA_HOME/main.py" "$UWA_HOME/browser_ensure.py" \
-        "$UWA_HOME/requirements.txt" "$UWA_HOME/app" "$UWA_HOME/config" \
+        "$UWA_HOME/requirements.txt" "$UWA_HOME/app" \
         "$UWA_HOME/.venv" \
         "$STAGING_APP/Contents/Resources/uwa-lite/"
+    # Ship only versioned configuration templates, never runtime history.
+    mkdir -p "$STAGING_APP/Contents/Resources/uwa-lite/config"
+    for config_name in browser_config commands extractors image_presets parsers site_rules sites sites.local; do
+        git -C "$PROJECT_ROOT" show "HEAD:Services/uwa-lite/config/$config_name.json" \
+            > "$STAGING_APP/Contents/Resources/uwa-lite/config/$config_name.json"
+    done
     find "$STAGING_APP/Contents/Resources/uwa-lite" \
         -type d -name '__pycache__' -prune -exec rm -rf {} +
     UWA_RUNTIME=$(sed -n 's/^executable = //p' "$UWA_HOME/.venv/pyvenv.cfg" \

@@ -988,8 +988,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         scrollView.backgroundColor = NSColor(calibratedWhite: 0.89, alpha: 1)
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.scrollerStyle = .overlay
+        // Keep the reading position available even while the PDF is idle.
+        // Overlay scrollers fade out regardless of autohidesScrollers.
+        scrollView.autohidesScrollers = false
+        scrollView.scrollerStyle = .legacy
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.setContentHuggingPriority(.fittingSizeCompression, for: .horizontal)
         scrollView.setContentCompressionResistancePriority(.fittingSizeCompression, for: .horizontal)

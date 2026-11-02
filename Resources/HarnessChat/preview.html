@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh" data-platform="darwin">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="assets/vendor-DV2921Zo.css">
+  <link rel="stylesheet" href="assets/index-BNyAYEM7.css">
+  <link rel="stylesheet" href="base.css">
+  <link rel="stylesheet" href="corner-shape.css">
+  <link rel="stylesheet" href="design-platform.css">
+  <link rel="stylesheet" href="focus.css">
+  <link rel="stylesheet" href="onboarding.css">
+  <link rel="stylesheet" href="scrollbar.css">
+  <link rel="stylesheet" href="gradient-shadow-text.css">
+  <link rel="stylesheet" href="shiki.css">
+  <link rel="stylesheet" href="pdf-reading.css">
+  <style>
+    html, body, #root { height: 100%; margin: 0; overflow: hidden; }
+    #root { position: relative; display: flex; flex-direction: column; }
+    body { --dsh-content-font-size: 14px; --dsh-code-font-size: 12px; }
+    /* Compact section dividers without altering the original theme assets. */
+    #chat-body [class*="_markdown_"] hr { margin-block: 16px; }
+    #chat-body [class*="_markdown_"] hr + :is(h1, h2, h3, h4, h5, h6) { margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <script>
+    window.__errors = [];
+    window.addEventListener('error', e => window.__errors.push(e.message || 'resource'), true);
+    window.addEventListener('unhandledrejection', e => window.__errors.push(String(e.reason)));
+  </script>
+  <div id="root"></div>
+  <script type="module" src="preview.js"></script>
+</body>
+</html>
