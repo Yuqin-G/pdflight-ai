@@ -331,6 +331,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     private var aiTask: Task<Void, Never>?
     private var activeAIPlaceholderID: String?
     private var aiHistorySaveTask: Task<Void, Never>?
+    private var deletedAIConversationIDs = Set<String>()
     private var aiHistoryLoaded = false
     private var aiSubmissionQueue = AIChatSubmissionQueue()
     private var pendingAIConversationID: String?
@@ -427,8 +428,9 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
     }
 
     override func showWindow(_ sender: Any?) {
+        let wasVisible = window?.isVisible == true
         super.showWindow(sender)
-        window?.center()
+        if !wasVisible && window?.tabGroup == nil { window?.center() }
         window?.makeKeyAndOrderFront(sender)
     }
 
@@ -2187,6 +2189,31 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         activateAIConversation(conversationID, persistSelection: true)
     }
 
+    var paperImportModelSelection: (routeID: String?, effort: String?) {
+        let conversation = activeAIConversationIndex.flatMap { aiHistory?.conversations[$0] }
+        return (conversation?.modelRouteID ?? aiConfigurationStore.defaultRouteID(), conversation?.reasoningEffort)
+    }
+
+    func refreshPaperImportConversation(_ conversationID: String, select: Bool) async {
+        guard let latest = try? await aiChatHistoryStore.history(for: documentURL),
+              let imported = latest.conversations.first(where: { $0.id == conversationID }) else { return }
+        // An import must never cancel an in-flight chat the reader started.
+        if var current = aiHistory {
+            if let index = current.conversations.firstIndex(where: { $0.id == conversationID }) { current.conversations[index] = imported }
+            else { current.conversations.append(imported) }
+            aiHistory = current
+        } else { aiHistory = latest; aiHistoryLoaded = true }
+        aiSidebar.setConversations(aiHistory?.conversations ?? latest.conversations, selectedID: aiHistory?.activeConversationID ?? conversationID)
+        guard aiTask == nil, select || aiHistory?.activeConversationID == conversationID else { return }
+        activateAIConversation(conversationID, persistSelection: false, preserveQueue: true)
+        setAIVisible(true)
+        switch imported.paperImport?.state {
+        case "running": aiSidebar.setActivity(.loading, detail: "正在后台执行深度阅读，结果会自动保存。")
+        case "failed": aiSidebar.setActivity(.failed, detail: "深度阅读未完成；记录已保留，可重试。")
+        default: aiSidebar.setActivity(.completed, detail: "深度阅读结果已保存。")
+        }
+    }
+
     private func createAIConversation() {
         guard aiHistoryLoaded, var history = aiHistory else { return }
         let conversation = AIConversation(
@@ -2334,9 +2361,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         }
         guard let snapshot = aiHistory else { return }
         aiHistorySaveTask?.cancel()
+        let deletedIDs = deletedAIConversationIDs
         aiHistorySaveTask = Task { [weak self, aiChatHistoryStore, documentURL] in
             guard !Task.isCancelled else { return }
-            try? await aiChatHistoryStore.save(snapshot, for: documentURL)
+            try? await aiChatHistoryStore.save(snapshot, for: documentURL, removingConversationIDs: deletedIDs)
             guard let self, !Task.isCancelled else { return }
             aiHistorySaveTask = nil
         }
@@ -2373,6 +2401,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        deletedAIConversationIDs.insert(id)
         let wasActive = history.activeConversationID == id
         if !wasActive {
             history.conversations.remove(at: index)

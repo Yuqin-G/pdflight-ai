@@ -22,7 +22,8 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     private var roots: [LibraryTreeItem] = []
     private var snapshot = PaperLibrarySnapshot()
     private var expandedCollectionIDs: Set<String> = []
-    private var isRecentExpanded = false
+    private var isRecentExpanded = true
+    private var isUnfiledExpanded = false
 
     init(store: PaperLibraryStore) {
         self.store = store
@@ -67,8 +68,17 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         outlineView.allowsMultipleSelection
     }
 
-    func recentHistoryStartsCollapsedForLayoutCheck() -> Bool {
-        !isRecentExpanded
+    func recentHistoryStartsExpandedForLayoutCheck() -> Bool {
+        isRecentExpanded
+    }
+
+    func unfiledStartsCollapsedForLayoutCheck() -> Bool { !isUnfiledExpanded }
+
+    func expansionMatchesDefaultsForLayoutCheck() -> Bool {
+        let recent = roots.first { $0.virtualKind == .recent }
+        let unfiled = roots.first { $0.virtualKind == .unfiled }
+        return recent.map { outlineView.isItemExpanded($0) } == true
+            && unfiled.map { !outlineView.isItemExpanded($0) } == true
     }
 
     private func configure() {
@@ -178,10 +188,9 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
             }
         }
         roots += buildCollections(parentID: nil, papers: matchingPapers, visibleCollectionIDs: matchingCollectionIDs)
-        let unfiled = matchingPapers.filter { $0.collectionID == nil }.sorted(by: paperSort)
-        if !unfiled.isEmpty {
-            roots.append(LibraryTreeItem.virtualUnfiled(children: unfiled.map(LibraryTreeItem.paper)))
-        }
+        let validIDs = Set(snapshot.collections.map(\.id))
+        let unfiled = matchingPapers.filter { $0.collectionID.map { !validIDs.contains($0) } ?? true }.sorted(by: paperSort)
+        roots.append(LibraryTreeItem.virtualUnfiled(children: unfiled.map(LibraryTreeItem.paper)))
         outlineView.reloadData()
         restoreExpansion(in: roots, expandAll: !query.isEmpty)
         countLabel.stringValue = "\(matchingPapers.count)"
@@ -231,7 +240,7 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
     private func restoreExpansion(in items: [LibraryTreeItem], expandAll: Bool) {
         for item in items where item.isExpandable {
             let shouldExpand = expandAll
-                || item.virtualKind == .unfiled
+                || (item.virtualKind == .unfiled && isUnfiledExpanded)
                 || (item.virtualKind == .recent && isRecentExpanded)
                 || item.collection.map({ expandedCollectionIDs.contains($0.id) }) == true
             if shouldExpand {
@@ -286,6 +295,8 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
                 expandedCollectionIDs.insert(id)
             } else if item.virtualKind == .recent {
                 isRecentExpanded = true
+            } else if item.virtualKind == .unfiled {
+                isUnfiledExpanded = true
             }
         }
     }
@@ -296,6 +307,8 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
                 expandedCollectionIDs.remove(id)
             } else if item.virtualKind == .recent {
                 isRecentExpanded = false
+            } else if item.virtualKind == .unfiled {
+                isUnfiledExpanded = false
             }
         }
     }
@@ -482,7 +495,7 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
 
     private func moveMenu(for paperIDs: [String]) -> NSMenu {
         let menu = NSMenu()
-        addMoveMenuItem(menu, title: "Unfiled", paperIDs: paperIDs, destinationID: nil)
+        addMoveMenuItem(menu, title: "Default", paperIDs: paperIDs, destinationID: nil)
         for collection in snapshot.collections.sorted(by: { collectionPath($0).localizedCaseInsensitiveCompare(collectionPath($1)) == .orderedAscending }) {
             addMoveMenuItem(
                 menu,
@@ -535,7 +548,7 @@ final class LibrarySidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDe
         guard let id = sender.representedObject as? String else { return }
         let alert = NSAlert()
         alert.messageText = "Delete this collection and its subcollections?"
-        alert.informativeText = "PDF files are not deleted. Papers become Unfiled."
+        alert.informativeText = "PDF files are not deleted. Papers move to Default."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -664,7 +677,7 @@ private final class LibraryTreeItem {
     }
 
     static func virtualUnfiled(children: [LibraryTreeItem]) -> LibraryTreeItem {
-        LibraryTreeItem(collection: nil, paper: nil, title: "Unfiled", virtualKind: .unfiled, children: children)
+        LibraryTreeItem(collection: nil, paper: nil, title: "Default", virtualKind: .unfiled, children: children)
     }
 
     static func virtualRecent(children: [LibraryTreeItem]) -> LibraryTreeItem {

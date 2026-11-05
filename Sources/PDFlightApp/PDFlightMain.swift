@@ -1,10 +1,42 @@
 import AppKit
 import Darwin
+import PDFlightAI
 
 @main
 enum PDFlightMain {
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--self-check-chat-renderer") {
+            do {
+                try NativePaperChatSidebar.rendererResourceSelfCheck()
+                print("PASS: chat renderer resource resolution and visible native fallback")
+            } catch {
+                fputs("FAIL: \(error.localizedDescription)\n", stderr)
+                exit(EXIT_FAILURE)
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--paper-import-capabilities") {
+            let value: [String: Any] = ["paperImportProtocol": 1, "queueDirectory": PaperImportQueue.defaultDirectory.path]
+            if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+               let output = String(data: data, encoding: .utf8) { print(output) }
+            return
+        }
+        if CommandLine.arguments.contains("--self-check-group-tabs") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.regular)
+            Task { @MainActor in
+                do {
+                    try await AppDelegate.groupTabsSelfCheck()
+                    exit(EXIT_SUCCESS)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    exit(EXIT_FAILURE)
+                }
+            }
+            application.run()
+            return
+        }
         if CommandLine.arguments.contains("--self-check-sidebar-layout")
             || CommandLine.arguments.contains("--self-check-math-rendering")
             || CommandLine.arguments.contains("--self-check-native-paper-chat") {

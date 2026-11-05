@@ -13,11 +13,12 @@ final class QuickOpenPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource,
     private let scrollView = NSScrollView()
     private var allPapers: [PaperLibraryPaper] = []
     private var filtered: [PaperLibraryPaper] = []
+    private var library = PaperLibrarySnapshot()
     private weak var previousKeyWindow: NSWindow?
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 360),
             styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -78,18 +79,22 @@ final class QuickOpenPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource,
         ])
     }
 
-    func show(papers: [PaperLibraryPaper]) {
-        allPapers = papers.sorted {
+    func show(library: PaperLibrarySnapshot, relativeTo anchorWindow: NSWindow? = nil) {
+        self.library = library
+        previousKeyWindow = anchorWindow ?? NSApp.keyWindow
+        allPapers = library.papers.sorted {
             ($0.lastOpenedAt ?? $0.addedAt) > ($1.lastOpenedAt ?? $1.addedAt)
         }
         searchField.stringValue = ""
         applyFilter()
-        previousKeyWindow = NSApp.keyWindow
         if let screen = previousKeyWindow?.screen ?? NSScreen.main {
-            let frame = screen.visibleFrame
+            let bounds = screen.visibleFrame.insetBy(dx: 12, dy: 12)
+            let anchor = previousKeyWindow?.frame ?? bounds
+            let width = min(800, anchor.width, bounds.width)
+            setContentSize(NSSize(width: width, height: min(360, bounds.height)))
             setFrameOrigin(NSPoint(
-                x: frame.midX - frame.width / 2,
-                y: frame.midY - frame.height / 4
+                x: min(max(anchor.midX - frame.width / 2, bounds.minX), bounds.maxX - frame.width),
+                y: min(max(anchor.midY - frame.height / 2, bounds.minY), bounds.maxY - frame.height)
             ))
         }
         makeKeyAndOrderFront(nil)
@@ -186,55 +191,71 @@ final class QuickOpenPanel: NSPanel, NSTextFieldDelegate, NSTableViewDataSource,
     ) -> NSView? {
         let paper = filtered[row]
         let identifier = NSUserInterfaceItemIdentifier("QuickOpenRow")
-        let cell: NSTableCellView
+        let cell: QuickOpenPaperCell
         if let reused = tableView.makeView(
             withIdentifier: identifier, owner: nil
-        ) as? NSTableCellView {
+        ) as? QuickOpenPaperCell {
             cell = reused
         } else {
-            cell = NSTableCellView()
-            let field = NSTextField(labelWithString: "")
-            field.lineBreakMode = .byTruncatingMiddle
-            field.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(field)
-            cell.textField = field
-            NSLayoutConstraint.activate([
-                field.leadingAnchor.constraint(
-                    equalTo: cell.leadingAnchor, constant: 14),
-                field.trailingAnchor.constraint(
-                    equalTo: cell.trailingAnchor, constant: -14),
-                field.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
+            cell = QuickOpenPaperCell()
             cell.identifier = identifier
         }
-        let directory = URL(fileURLWithPath: paper.path)
-            .deletingLastPathComponent().lastPathComponent
-        cell.textField?.attributedStringValue = QuickOpenPanel.rowTitle(
-            paper.displayTitle, directory: directory
-        )
-        cell.toolTip = paper.path
+        let collection = library.collections.first { $0.id == paper.collectionID }
+        var names = collection.map { [$0.name] } ?? ["Default"]
+        var parent = collection?.parentID
+        var seen = Set<String>()
+        while let id = parent, seen.insert(id).inserted,
+              let ancestor = library.collections.first(where: { $0.id == id }) {
+            names.insert(ancestor.name, at: 0)
+            parent = ancestor.parentID
+        }
+        let path = names.joined(separator: " / ")
+        cell.textField?.stringValue = paper.displayTitle
+        cell.badge.stringValue = collection?.name ?? "Default"
+        cell.badge.toolTip = path
+        cell.badge.setAccessibilityLabel("Collection: \(path)")
+        cell.toolTip = "\(paper.displayTitle)\nCollection: \(path)\n\(paper.path)"
         return cell
     }
+}
 
-    private static func rowTitle(
-        _ title: String, directory: String
-    ) -> NSAttributedString {
-        let result = NSMutableAttributedString(
-            string: title,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 13),
-                .foregroundColor: NSColor.labelColor,
-            ]
-        )
-        if !directory.isEmpty {
-            result.append(NSAttributedString(
-                string: "  —  \(directory)",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 11.5),
-                    .foregroundColor: NSColor.tertiaryLabelColor,
-                ]
-            ))
+@MainActor
+private final class QuickOpenPaperCell: NSTableCellView {
+    let badge = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        let title = NSTextField(labelWithString: "")
+        title.font = .systemFont(ofSize: 13)
+        title.lineBreakMode = .byTruncatingTail
+        title.maximumNumberOfLines = 1
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        badge.font = .systemFont(ofSize: 11, weight: .medium)
+        badge.textColor = .secondaryLabelColor
+        badge.lineBreakMode = .byTruncatingMiddle
+        badge.maximumNumberOfLines = 1
+        badge.alignment = .center
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 4
+        badge.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        badge.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        for view in [title, badge] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
         }
-        return result
+        textField = title
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            title.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: -12),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 56),
+            badge.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.3),
+            badge.heightAnchor.constraint(equalToConstant: 22)
+        ])
     }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

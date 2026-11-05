@@ -10,6 +10,14 @@ private struct SlowTestSecretStore: AISecretStore {
 @main
 enum PDFlightAIChecks {
     static func main() async throws {
+        if CommandLine.arguments.contains("--paper-import-recovery-only") {
+            try await PaperImportQueueChecks.recoveryOnly()
+            return
+        }
+        if CommandLine.arguments.contains("--paper-import-only") {
+            try await PaperImportQueueChecks.run()
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--inspect-staged-history"), CommandLine.arguments.count > index + 1 {
             let directory = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
             let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
@@ -1429,4 +1437,194 @@ private actor StubDocumentEngine: DocumentEngine {
     func undoLastAnnotation() throws -> Int? { nil }
     func save(to url: URL) throws {}
     func releaseMemory() {}
+}
+
+
+private actor ImportMockCalls {
+    var count = 0
+    func record() { count += 1 }
+}
+
+enum PaperImportQueueChecks {
+    static func recoveryOnly() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pdflight-import-recovery-mock-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("history")
+        let pdf = root.appendingPathComponent("mock.pdf")
+        let store = AIChatHistoryStore(directoryURL: directory)
+        try await store.upsertConversation(AIConversation(id: "ordinary", messages: [.init(role: .user, content: "ordinary chat")]), for: pdf)
+        let original = try Data(contentsOf: store.fileURL(for: pdf))
+        let queueRoot = root.appendingPathComponent("queue")
+        let queue = PaperImportQueue(directory: queueRoot, histories: store)
+        let request = PaperImportRequest(pdfPath: pdf.path, title: "Recovery mock", prompt: "完整中文 mock 深读提示词")
+        let calls = ImportMockCalls()
+        let prepare: PaperImportQueue.Prepare = { _ in .init(context: "[Page 1] mock body", scope: "mock only") }
+        let model: PaperImportQueue.Model = { _, _, _ in
+            await calls.record()
+            return AsyncThrowingStream { $0.yield(.contentDelta("这是应当恢复的最终 mock 解读。")); $0.yield(.finished); $0.finish() }
+        }
+        func check(_ condition: Bool, _ message: String) throws {
+            if !condition { throw PaperImportFailure("recovery mock: " + message) }
+        }
+        func enqueue() throws {
+            let requests = queueRoot.appendingPathComponent("requests")
+            try FileManager.default.createDirectory(at: requests, withIntermediateDirectories: true)
+            try JSONEncoder().encode(request).write(to: requests.appendingPathComponent(request.requestID + ".json"), options: .atomic)
+        }
+        try enqueue()
+        try await queue.poll(prepare: prepare, model: model)
+        let completed = try await store.history(for: pdf)
+        guard let imported = completed.conversations.first(where: { $0.paperImport?.requestID == request.requestID && $0.paperImport?.state == "succeeded" }) else {
+            throw PaperImportFailure("recovery mock: no completed conversation")
+        }
+        let completedJSON = try Data(contentsOf: store.fileURL(for: pdf))
+        // Bypass every new lock/merge exactly as an old in-memory app does.
+        try original.write(to: store.fileURL(for: pdf), options: .atomic)
+        let reopened = AIChatHistoryStore(directoryURL: directory)
+        let restored = try await reopened.history(for: pdf)
+        try check(restored.activeConversationID == imported.id && restored.conversations.contains {
+            $0.id == imported.id && $0.messages.contains { $0.content.contains("应当恢复的最终 mock 解读") }
+        }, "reopening restores and selects the independent completed reading")
+        try check(Data(contentsOf: store.fileURL(for: pdf)) == original, "read recovery must not overwrite the legacy JSON")
+        try enqueue()
+        try await queue.poll(prepare: prepare, model: model)
+        let afterDuplicate = await calls.count
+        try check(afterDuplicate == 1, "recovered requestID must not call the model again")
+        var removing = try await reopened.history(for: pdf)
+        removing.conversations.removeAll { $0.id == imported.id }
+        try await reopened.save(removing, for: pdf, removingConversationIDs: [imported.id])
+        // An even later old snapshot still contains the now explicitly deleted ID.
+        try completedJSON.write(to: store.fileURL(for: pdf), options: .atomic)
+        let afterDelete = try await AIChatHistoryStore(directoryURL: directory).history(for: pdf)
+        try check(!afterDelete.conversations.contains { $0.id == imported.id }, "explicit deletion must not resurrect from JSON or sidecar")
+        let menuHistories = try await reopened.allHistories()
+        try check(!menuHistories.flatMap(\.conversations).contains { $0.id == imported.id }, "deleted import must not reappear in the history menu")
+        try enqueue()
+        try await queue.poll(prepare: prepare, model: model)
+        let afterDeletedDuplicate = await calls.count
+        try check(afterDeletedDuplicate == 1, "deleted completed request retains an idempotence receipt")
+        let stillDeleted = try await reopened.history(for: pdf)
+        try check(!stillDeleted.conversations.contains { $0.id == imported.id }, "deduplicating a deleted request must not recreate its conversation")
+        var future = try JSONSerialization.jsonObject(with: original) as! [String: Any]
+        future["formatVersion"] = 999
+        let unsupported = try JSONSerialization.data(withJSONObject: future)
+        try unsupported.write(to: store.fileURL(for: pdf), options: .atomic)
+        var refused = false
+        do { try await reopened.save(removing, for: pdf) } catch { refused = true }
+        try check(refused && Data(contentsOf: store.fileURL(for: pdf)) == unsupported, "unsupported main JSON must stay intact")
+        print("PASS: isolated import sidecar restores overwritten history, deduplicates without a model call, honors explicit deletion/tombstones, and preserves unsupported main JSON")
+    }
+
+    static func run() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pdflight-import-mock-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("queue/requests"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pdf = root.appendingPathComponent("mock.pdf")
+        try Data("isolated mock; no real PDF or provider".utf8).write(to: pdf)
+        let histories = AIChatHistoryStore(directoryURL: root.appendingPathComponent("history"))
+        let concurrentStore = AIChatHistoryStore(directoryURL: root.appendingPathComponent("history"))
+        let existing = AIConversation(id: "existing", title: "Keep existing conversation", messages: [.init(role: .user, content: "old message")])
+        try await histories.upsertConversation(existing, for: pdf)
+        let stale = try await histories.history(for: pdf)
+        let queueRoot = root.appendingPathComponent("queue")
+        let queue = PaperImportQueue(directory: queueRoot, histories: histories)
+        let calls = ImportMockCalls()
+        let prompt = "完整中文提示词：逐节深度阅读，并给出证据和页码。"
+        let prepare: PaperImportQueue.Prepare = { _ in .init(context: "[Page 1]\nFULL MOCK PAPER BODY", scope: "仅隔离 mock 的第 1 页正文") }
+        let model: PaperImportQueue.Model = { request, _, input in
+            guard request.prompt == prompt, input.context.contains("FULL MOCK PAPER BODY") else { throw PaperImportFailure("missing full prompt/body") }
+            await calls.record()
+            // Simulate a second history actor writing while the job is running.
+            try await concurrentStore.upsertConversation(AIConversation(id: "concurrent", messages: [.init(role: .user, content: "concurrent user message")]), for: pdf)
+            return AsyncThrowingStream { continuation in
+                continuation.yield(.contentDelta("这是已完成的 mock 最终回答，证据见第 1 页。"))
+                continuation.yield(.finished)
+                continuation.finish()
+            }
+        }
+        func check(_ condition: Bool, _ message: String) throws {
+            if !condition { throw PaperImportFailure("mock check: " + message) }
+        }
+        func enqueue(_ request: PaperImportRequest, at directory: URL = queueRoot) throws {
+            let requests = directory.appendingPathComponent("requests")
+            try FileManager.default.createDirectory(at: requests, withIntermediateDirectories: true)
+            try JSONEncoder().encode(request).write(to: requests.appendingPathComponent(request.requestID + ".json"), options: .atomic)
+        }
+        func status(_ request: PaperImportRequest, at directory: URL = queueRoot) throws -> PaperImportStatus {
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(PaperImportStatus.self, from: Data(contentsOf: directory.appendingPathComponent("status/\(request.requestID).json")))
+        }
+        let success = PaperImportRequest(pdfPath: pdf.path, title: "Mock paper", prompt: prompt)
+        try enqueue(success)
+        try await queue.poll(prepare: prepare, model: model)
+        let result = try status(success)
+        try check(result.state == "succeeded" && result.historyPath == histories.fileURL(for: pdf).path, "success requires durable history")
+        try check(!FileManager.default.fileExists(atPath: queueRoot.appendingPathComponent("processing/\(success.requestID).json").path)
+                  && FileManager.default.fileExists(atPath: queueRoot.appendingPathComponent("archive/\(success.requestID)").path), "terminal success releases processing and keeps archived request")
+        var history = try await histories.history(for: pdf)
+        try check(history.conversations.contains { $0.id == "existing" } && history.conversations.contains { $0.id == "concurrent" }, "preserve prior and concurrent sessions")
+        try check(history.conversations.first { $0.id == result.conversationID }?.messages.contains { $0.role == .user && $0.content == prompt } == true, "save exact producer prompt")
+        try await histories.save(stale, for: pdf)
+        history = try await histories.history(for: pdf)
+        try check(history.conversations.contains { $0.id == result.conversationID } && history.conversations.contains { $0.id == "concurrent" }, "stale reader snapshot cannot erase new sessions")
+        let competitor = PaperImportQueue(directory: queueRoot, histories: histories)
+        let acquired = try await competitor.poll(prepare: prepare, model: model)
+        try check(!acquired, "only one queue consumer owns the lock")
+        try enqueue(success)
+        try await queue.poll(prepare: prepare, model: model)
+        let firstCount = await calls.count
+        try check(firstCount == 1 && status(success).state == "succeeded", "successful requestID is idempotent")
+
+        let reasoning = PaperImportRequest(pdfPath: pdf.path, title: "Reasoning only", prompt: prompt)
+        try enqueue(reasoning)
+        try await queue.poll(prepare: prepare) { _, _, _ in
+            AsyncThrowingStream { $0.yield(.reasoningDelta("只有思考，没有最终回答")); $0.yield(.finished); $0.finish() }
+        }
+        try check(status(reasoning).state == "failed", "reasoning alone must fail")
+        try check(!FileManager.default.fileExists(atPath: queueRoot.appendingPathComponent("processing/\(reasoning.requestID).json").path), "failed request releases skill retry guard")
+        try enqueue(reasoning)
+        try await queue.poll(prepare: prepare, model: model)
+        try check(status(reasoning).state == "succeeded", "same failed requestID can retry")
+        history = try await histories.history(for: pdf)
+        let attempts = history.conversations.filter { $0.paperImport?.requestID == reasoning.requestID }
+        try check(attempts.count == 2 && attempts.contains { $0.paperImport?.state == "failed" && $0.messages.contains { $0.reasoning != nil } }, "retain failed attempt and reasoning")
+
+        for failure in ["no-model", "extraction", "network", "incomplete-stream"] {
+            let request = PaperImportRequest(pdfPath: pdf.path, title: failure, prompt: prompt)
+            try enqueue(request)
+            try await queue.poll(prepare: { item in
+                if item.title == "extraction" { throw PaperImportFailure("mock PDF extraction failure") }
+                return try await prepare(item)
+            }) { item, _, _ in
+                if item.title == "no-model" { throw PaperImportFailure("mock no model") }
+                return AsyncThrowingStream { continuation in
+                    continuation.yield(.contentDelta("partial answer"))
+                    if item.title == "network" { continuation.finish(throwing: PaperImportFailure("mock network failure")) }
+                    else { continuation.finish() }
+                }
+            }
+            try check(status(request).state == "failed", "\(failure) must not succeed")
+        }
+        let blockedDirectory = root.appendingPathComponent("blocked-history")
+        try Data("not a directory".utf8).write(to: blockedDirectory)
+        let brokenRoot = root.appendingPathComponent("broken-queue")
+        let broken = PaperImportQueue(directory: brokenRoot, histories: AIChatHistoryStore(directoryURL: blockedDirectory))
+        let unsaved = PaperImportRequest(pdfPath: pdf.path, title: "unsaved", prompt: prompt)
+        try enqueue(unsaved, at: brokenRoot)
+        try await broken.poll(prepare: prepare, model: model)
+        try check(status(unsaved, at: brokenRoot).state == "failed", "persistence failure must not succeed")
+        let recoveryRoot = root.appendingPathComponent("recovery-queue")
+        try FileManager.default.createDirectory(at: recoveryRoot.appendingPathComponent("processing"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: recoveryRoot.appendingPathComponent("status"), withIntermediateDirectories: true)
+        let interrupted = PaperImportRequest(pdfPath: pdf.path, title: "interrupted", prompt: prompt)
+        try JSONEncoder().encode(interrupted).write(to: recoveryRoot.appendingPathComponent("processing/\(interrupted.requestID).json"), options: .atomic)
+        let oldFailed = "{\"version\":1,\"requestID\":\"\(interrupted.requestID)\",\"state\":\"failed\",\"stage\":\"previous failure\",\"updatedAt\":\"2026-11-05T00:00:00Z\"}"
+        try Data(oldFailed.utf8).write(to: recoveryRoot.appendingPathComponent("status/\(interrupted.requestID).json"), options: .atomic)
+        let recovery = PaperImportQueue(directory: recoveryRoot, histories: histories)
+        try await recovery.poll(prepare: prepare, model: model)
+        try check(!FileManager.default.fileExists(atPath: recoveryRoot.appendingPathComponent("processing/\(interrupted.requestID).json").path)
+                  && status(interrupted, at: recoveryRoot).state == "failed", "startup releases an already failed legacy claim")
+        print("PASS: paper-import isolated mock success, exact prompt/body, history merge, exclusive consumer, idempotence, retry, reasoning-only/extraction/network/incomplete/persistence failures")
+    }
 }

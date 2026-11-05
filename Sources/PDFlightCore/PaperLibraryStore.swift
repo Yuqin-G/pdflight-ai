@@ -240,6 +240,28 @@ public actor PaperLibraryStore {
         try movePapers([id], to: collectionID)
     }
 
+    /// Assign an open PDF, including one not yet recorded in Library, atomically.
+    /// nil explicitly means the built-in Default collection.
+    @discardableResult
+    public func movePaper(at url: URL, to collectionID: String?) throws -> PaperLibraryPaper {
+        var state = try loadIfNeeded()
+        if let collectionID, !state.collections.contains(where: { $0.id == collectionID }) {
+            throw PaperLibraryError.collectionNotFound
+        }
+        let normalized = url.standardizedFileURL
+        let index: Int
+        if let existing = state.papers.firstIndex(where: { $0.fileURL.standardizedFileURL == normalized }) {
+            index = existing
+            state.papers[index].collectionID = collectionID
+        } else {
+            index = state.papers.count
+            state.papers.append(PaperLibraryPaper(title: normalized.deletingPathExtension().lastPathComponent,
+                                                  path: normalized.path, collectionID: collectionID))
+        }
+        try save(state)
+        return state.papers[index]
+    }
+
     public func movePapers(_ ids: [String], to collectionID: String?) throws {
         var state = try loadIfNeeded()
         if let collectionID, !state.collections.contains(where: { $0.id == collectionID }) {

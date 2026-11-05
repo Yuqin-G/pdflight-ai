@@ -11,7 +11,8 @@ public struct OpenAICompatibleClient: Sendable {
         conversationTitle: String? = nil,
         currentPDFURL: URL? = nil,
         additionalPDFURLs: [URL] = [],
-        tools: [AIChatToolDefinition] = []
+        tools: [AIChatToolDefinition] = [],
+        requireFinishedResponse: Bool = false
     ) -> AsyncThrowingStream<OpenAIStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -46,16 +47,28 @@ public struct OpenAICompatibleClient: Sendable {
                     var decoder = OpenAIStreamDecoder(api: configuration.api)
                     for try await line in bytes.lines {
                         try Task.checkCancellation()
+                        if requireFinishedResponse, line.hasPrefix("data:"),
+                           let data = String(line.dropFirst(5)).data(using: .utf8),
+                           let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                            let choice = (value["choices"] as? [[String: Any]])?.first
+                            let stop = choice?["finish_reason"] as? String ?? (value["delta"] as? [String: Any])?["stop_reason"] as? String
+                            if ["length", "max_tokens", "content_filter"].contains(stop ?? "") || value["type"] as? String == "response.incomplete" {
+                                throw OpenAICompatibleError.service("模型输出被截断或过滤，不能确认完整最终回答。")
+                            }
+                        }
                         guard let event = try decoder.decode(line: line) else { continue }
                         switch event {
                         case .contentDelta, .reasoningDelta, .toolCallDeltas:
                             continuation.yield(event)
                         case .finished:
+                            if requireFinishedResponse { continuation.yield(.finished) }
                             continuation.finish()
                             return
                         }
                     }
-                    continuation.finish()
+                    if requireFinishedResponse {
+                        continuation.finish(throwing: OpenAICompatibleError.service("模型连接在完成标记前结束，未确认最终回答。"))
+                    } else { continuation.finish() }
                 } catch is CancellationError {
                     continuation.finish(throwing: CancellationError())
                 } catch {

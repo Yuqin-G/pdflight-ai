@@ -6,6 +6,64 @@ import UniformTypeIdentifiers
 @MainActor
 final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     static let customRouteID = "__pdflight_custom_model__"
+    static func rendererResourceSelfCheck() throws {
+        func require(_ condition: Bool, _ text: String) throws {
+            if !condition { throw NSError(domain: "ChatRendererCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pdflight-renderer-check-\(UUID().uuidString)").resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("project")
+        let source = project.appendingPathComponent("Resources/HarnessChat")
+        let bundled = directory.appendingPathComponent("Fixture.app/Contents/Resources/HarnessChat")
+        for root in [source, bundled] {
+            for name in HarnessChatResourceLocator.requiredFiles {
+                let file = root.appendingPathComponent(name)
+                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data("synthetic renderer fixture".utf8).write(to: file)
+            }
+        }
+        try Data("// synthetic package".utf8).write(to: project.appendingPathComponent("Package.swift"))
+        let executable = project.appendingPathComponent(".build/arm64-apple-macosx/debug/PDFlight")
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: executable)
+        try require(HarnessChatResourceLocator.resolve(bundleResources: nil, executable: executable)?.path == source.path,
+                    "Bare debug executable must find the enclosing project's HarnessChat resources")
+        try require(HarnessChatResourceLocator.resolve(bundleResources: bundled.deletingLastPathComponent(), executable: executable)?.path == bundled.path,
+                    "Complete application bundle resources must take precedence")
+        let alias = project.appendingPathComponent(".build/debug")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: executable.deletingLastPathComponent())
+        try require(HarnessChatResourceLocator.resolve(bundleResources: nil, executable: alias.appendingPathComponent("PDFlight"))?.path == source.path,
+                    "Debug symlink must resolve using the real executable location")
+        try require(HarnessChatResourceLocator.resolve(bundleResources: nil, executable: directory.appendingPathComponent("isolated/PDFlight")) == nil,
+                    "Missing resources must be explicit")
+        try require(HarnessChatResourceLocator.resolve(bundleResources: Bundle.main.resourceURL, executable: Bundle.main.executableURL) != nil,
+                    "The actual built executable must resolve a usable renderer")
+        _ = NSApplication.shared
+        let fixture = [AIChatMessage(id: "fixture-user", role: .user, content: "Synthetic question"),
+                       AIChatMessage(id: "fixture-answer", role: .assistant, content: "Synthetic saved answer")]
+        let missing = HarnessChatPreview(frame: .zero, resourceRoot: nil)
+        let sidebar = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 500, height: 700), preview: missing)
+        sidebar.install(fixture)
+        sidebar.composer.string = "Synthetic unsent draft"
+        missing.activate()
+        sidebar.layoutSubtreeIfNeeded()
+        try require(sidebar.messagesScroll.superview != nil && !sidebar.messagesScroll.isHidden && missing.isHidden,
+                    "Missing resources must leave native messages visible")
+        try require(!sidebar.rendererNotice.isHidden && sidebar.rendererNotice.stringValue.contains("资源缺失"),
+                    "Missing renderer resources must explain the native fallback")
+        try require(sidebar.messageContents["fixture-answer"] == "Synthetic saved answer" && sidebar.composer.string == "Synthetic unsent draft",
+                    "Native fallback must preserve the synthetic transcript and unsent draft")
+        for reason in ["模拟导航失败", "模拟 JavaScript 初始化失败"] {
+            let preview = HarnessChatPreview(frame: .zero, resourceRoot: source)
+            let probe = NativePaperChatSidebar(frame: NSRect(x: 0, y: 0, width: 500, height: 700), preview: preview)
+            probe.install(fixture)
+            preview.renderingFailed(reason)
+            try require(!probe.messagesScroll.isHidden && preview.isHidden && probe.rendererNotice.stringValue == reason,
+                        "Navigation/JS failure must visibly fall back without clearing messages")
+            preview.close()
+        }
+        missing.close()
+    }
     static func selfCheck() throws {
         try NativeModelPopover.selfCheck()
         guard AIChatRenderedContentView.harnessLinkHitTestForLayoutCheck() else {
@@ -276,6 +334,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private let messagesScroll = NativePaperChatScrollView()
     // Temporary opt-in rendering preview; input and execution remain native.
     private let harnessPreview: HarnessChatPreview?
+    private let rendererNotice = NSTextField(wrappingLabelWithString: "")
     private let messagesStack = NativePaperMessageStack()
     private var messagesWidthConstraint: NSLayoutConstraint?
     private let composerCard = NSView()
@@ -362,6 +421,11 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     }
     private init(frame: NSRect, harnessPreviewEnabled: Bool) {
         harnessPreview = harnessPreviewEnabled ? HarnessChatPreview() : nil
+        super.init(frame: frame)
+        setup()
+    }
+    private init(frame: NSRect, preview: HarnessChatPreview) {
+        harnessPreview = preview
         super.init(frame: frame)
         setup()
     }
@@ -557,7 +621,38 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         let bottom = NSStackView(views: [composerSeat, statusLabel]); bottom.orientation = .vertical
         composerBottom = bottom
         bottom.alignment = .width; bottom.spacing = 5; bottom.edgeInsets = NSEdgeInsets(top: 5, left: 10, bottom: 8, right: 10)
-        let visibleMessages: NSView = harnessPreview ?? messagesScroll
+        let visibleMessages: NSView
+        if let harnessPreview {
+            let body = NSView()
+            for view in [messagesScroll as NSView, harnessPreview] {
+                view.translatesAutoresizingMaskIntoConstraints = false
+                body.addSubview(view)
+                NSLayoutConstraint.activate([
+                    view.leadingAnchor.constraint(equalTo: body.leadingAnchor),
+                    view.trailingAnchor.constraint(equalTo: body.trailingAnchor),
+                    view.topAnchor.constraint(equalTo: body.topAnchor),
+                    view.bottomAnchor.constraint(equalTo: body.bottomAnchor)
+                ])
+            }
+            harnessPreview.isHidden = true
+            rendererNotice.stringValue = "聊天显示正在加载，暂用本地原生消息。"
+            rendererNotice.font = .systemFont(ofSize: 11)
+            rendererNotice.textColor = .secondaryLabelColor
+            rendererNotice.setAccessibilityIdentifier("chat.renderer.notice")
+            rendererNotice.setContentCompressionResistancePriority(.required, for: .vertical)
+            let transcript = NSStackView(views: [rendererNotice, body])
+            transcript.orientation = .vertical
+            transcript.alignment = .width
+            transcript.spacing = 4
+            harnessPreview.onRenderingStateChanged = { [weak self, weak harnessPreview] ready, explanation in
+                guard let self else { return }
+                self.messagesScroll.isHidden = ready
+                harnessPreview?.isHidden = !ready
+                self.rendererNotice.stringValue = explanation ?? ""
+                self.rendererNotice.isHidden = ready
+            }
+            visibleMessages = transcript
+        } else { visibleMessages = messagesScroll }
         let stack = NSStackView(views: [top, divider(), prompts, divider(), visibleMessages, bottom])
         stack.orientation = .vertical; stack.alignment = .width; stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false; addSubview(stack)

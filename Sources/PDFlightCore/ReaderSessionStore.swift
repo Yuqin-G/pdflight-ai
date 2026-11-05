@@ -1,22 +1,28 @@
 import Foundation
 
 public struct ReaderSessionSnapshot: Codable, Equatable, Sendable {
-    public static let currentFormatVersion = 1
+    public static let currentFormatVersion = 2
 
     public var formatVersion: Int
     public var documentPaths: [String]
     public var activeDocumentPath: String?
+    public var groups: [ReaderTabGroupSession]?
+    public var activeGroupID: String?
     public var updatedAt: Date
 
     public init(
         formatVersion: Int = currentFormatVersion,
         documentPaths: [String],
         activeDocumentPath: String? = nil,
+        groups: [ReaderTabGroupSession]? = nil,
+        activeGroupID: String? = nil,
         updatedAt: Date = Date()
     ) {
         self.formatVersion = formatVersion
         self.documentPaths = documentPaths
         self.activeDocumentPath = activeDocumentPath
+        self.groups = groups
+        self.activeGroupID = activeGroupID
         self.updatedAt = updatedAt
     }
 }
@@ -24,10 +30,14 @@ public struct ReaderSessionSnapshot: Codable, Equatable, Sendable {
 public struct ReaderSessionState: Equatable, Sendable {
     public var documentURLs: [URL]
     public var activeDocumentURL: URL?
+    public var groups: [ReaderTabGroupSession]
+    public var activeGroupID: String
 
-    public init(documentURLs: [URL], activeDocumentURL: URL?) {
+    public init(documentURLs: [URL], activeDocumentURL: URL?, groups: [ReaderTabGroupSession]? = nil, activeGroupID: String = ReaderTabGroups.defaultID) {
         self.documentURLs = documentURLs
         self.activeDocumentURL = activeDocumentURL
+        self.groups = groups ?? [ReaderTabGroupSession(id: ReaderTabGroups.defaultID, documentPaths: documentURLs.map(\.path), activeDocumentPath: activeDocumentURL?.path)]
+        self.activeGroupID = activeGroupID
     }
 }
 
@@ -63,7 +73,7 @@ public final class ReaderSessionStore: @unchecked Sendable {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let snapshot = try decoder.decode(ReaderSessionSnapshot.self, from: data)
-            guard snapshot.formatVersion == ReaderSessionSnapshot.currentFormatVersion else {
+            guard (1...ReaderSessionSnapshot.currentFormatVersion).contains(snapshot.formatVersion) else {
                 throw ReaderSessionStoreError.unsupportedFormat(snapshot.formatVersion)
             }
             let documentURLs = snapshot.documentPaths.map {
@@ -74,7 +84,9 @@ public final class ReaderSessionStore: @unchecked Sendable {
             }
             return ReaderSessionState(
                 documentURLs: documentURLs,
-                activeDocumentURL: activeDocumentURL
+                activeDocumentURL: activeDocumentURL,
+                groups: snapshot.groups?.map(\.normalized),
+                activeGroupID: snapshot.activeGroupID ?? ReaderTabGroups.defaultID
             )
         }
     }
@@ -99,6 +111,29 @@ public final class ReaderSessionStore: @unchecked Sendable {
             )
             let directory = fileURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            try encoder.encode(snapshot).write(to: fileURL, options: .atomic)
+        }
+    }
+
+    public func save(groups: [ReaderTabGroupSession], activeGroupID: String) throws {
+        try lock.withLock {
+            var seen: Set<String> = []
+            var normalized = groups.filter { seen.insert($0.id).inserted }.map(\.normalized)
+            let defaultGroup = normalized.first { $0.id == ReaderTabGroups.defaultID }
+                ?? ReaderTabGroupSession(id: ReaderTabGroups.defaultID)
+            normalized.removeAll { $0.id == ReaderTabGroups.defaultID }
+            normalized.insert(defaultGroup, at: 0)
+            let selectedID = normalized.contains(where: { $0.id == activeGroupID }) ? activeGroupID : ReaderTabGroups.defaultID
+            let selected = normalized.first { $0.id == selectedID }
+            let snapshot = ReaderSessionSnapshot(
+                documentPaths: normalized.flatMap(\.documentPaths),
+                activeDocumentPath: selected?.activeDocumentPath,
+                groups: normalized, activeGroupID: selectedID
+            )
+            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

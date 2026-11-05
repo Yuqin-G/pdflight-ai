@@ -18,6 +18,8 @@ enum PDFlightCoreChecks {
         print("PASS: reading position store prunes old documents")
         try readerSessionStoreRestoresOnlyTheLastOpenPDFs()
         print("PASS: reader session store restores only the last open PDFs")
+        try groupedSessionsMigrateAndPreserveIndependentSelections()
+        print("PASS: grouped sessions migrate v1 and preserve empty groups, independent selections and duplicate PDFs across groups")
         try await paperLibraryPersistsNestedCollectionsAndAssignments()
         print("PASS: paper library persists nested collections and paper assignments")
         try await paperLibraryTracksTrueRecentFilesAndMovesSelectionsAtomically()
@@ -85,6 +87,42 @@ enum PDFlightCoreChecks {
         } catch PaperLibraryError.collectionCycle {
             // Expected.
         }
+    }
+
+    private static func groupedSessionsMigrateAndPreserveIndependentSelections() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pdflight-groups-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("session.json")
+        let legacy = Data("""
+        {"formatVersion":1,"documentPaths":["/tmp/a.pdf","/tmp/b.pdf"],"activeDocumentPath":"/tmp/b.pdf","updatedAt":"2026-11-05T00:00:00Z"}
+        """.utf8)
+        try legacy.write(to: file)
+        let store = ReaderSessionStore(fileURL: file)
+        let migrated = try store.state()
+        try check(migrated.groups == [ReaderTabGroupSession(id: ReaderTabGroups.defaultID, documentPaths: ["/tmp/a.pdf", "/tmp/b.pdf"], activeDocumentPath: "/tmp/b.pdf")], "v1 tabs and selected PDF must migrate to Default")
+        let groups = [
+            ReaderTabGroupSession(id: ReaderTabGroups.defaultID, documentPaths: ["/tmp/a.pdf", "/tmp/b.pdf"], activeDocumentPath: "/tmp/b.pdf"),
+            ReaderTabGroupSession(id: "collection:a", documentPaths: ["/tmp/a.pdf"], activeDocumentPath: "/tmp/a.pdf"),
+            ReaderTabGroupSession(id: "collection:empty")
+        ]
+        try store.save(groups: groups, activeGroupID: "collection:empty")
+        let restored = try store.state()
+        try check(restored.groups == groups && restored.activeGroupID == "collection:empty", "group order, empty selection and per-group active tabs must survive restart")
+        try store.save(groups: groups, activeGroupID: "deleted")
+        let invalidSelection = try store.state()
+        try check(invalidSelection.activeGroupID == ReaderTabGroups.defaultID, "invalid selected group must fall back to Default")
+        let parent = PaperLibraryCollection(id: "a", name: "Topic", parentID: nil)
+        let child = PaperLibraryCollection(id: "b", name: "Topic", parentID: "a")
+        var library = PaperLibrarySnapshot(collections: [parent, child], papers: [
+            PaperLibraryPaper(id: "paper", title: "a.pdf", path: "/tmp/a.pdf", collectionID: "b")
+        ])
+        try check(ReaderTabGroups.orderedIDs(in: library) == ["default", "collection:a", "collection:b"], "nested and identically named collections must have independent stable IDs")
+        try check(ReaderTabGroups.destination(for: URL(fileURLWithPath: "/tmp/a.pdf"), in: library) == "collection:b", "Library opens must target the exact owning collection")
+        library.collections[1].name = "Renamed"
+        try check(ReaderTabGroups.destination(for: URL(fileURLWithPath: "/tmp/a.pdf"), in: library) == "collection:b", "renaming must preserve group identity")
+        library.collections = []
+        try check(ReaderTabGroups.destination(for: URL(fileURLWithPath: "/tmp/a.pdf"), in: library) == "default", "deleted ownership must fall back to Default")
     }
 
     private static func readerSessionStoreRestoresOnlyTheLastOpenPDFs() throws {

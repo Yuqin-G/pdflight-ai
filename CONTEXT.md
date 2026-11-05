@@ -16,6 +16,7 @@ _Avoid_: File rename, paper file name
 A reader-created library group that can contain papers and nested collections.
 _Avoid_: Folder, directory
 
-**Unfiled**:
+**Default**:
 The virtual library group containing papers that are not assigned to a collection.
-_Avoid_: Default folder
+It shares the built-in Default reading group identity; older internal fields may still use `unfiled`.
+_Avoid_: Unfiled, Default folder

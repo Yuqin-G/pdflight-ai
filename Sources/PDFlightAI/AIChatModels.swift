@@ -200,6 +200,15 @@ public enum AIChatAccessMode: String, Codable, Sendable, CaseIterable {
     }
 }
 
+public struct AIPaperImportMetadata: Codable, Sendable, Equatable {
+    public var requestID: String
+    public var state: String
+    public var scope: String?
+    public init(requestID: String, state: String, scope: String? = nil) {
+        self.requestID = requestID; self.state = state; self.scope = scope
+    }
+}
+
 public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public var title: String
@@ -213,6 +222,7 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
     public var webConversationURL: String?
     public var reasoningEffort: String?
     public var accessMode: AIChatAccessMode?
+    public var paperImport: AIPaperImportMetadata?
 
     public init(
         id: String = UUID().uuidString,
@@ -226,7 +236,8 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
         webConversationKey: String? = nil,
         webConversationURL: String? = nil,
         reasoningEffort: String? = nil,
-        accessMode: AIChatAccessMode? = nil
+        accessMode: AIChatAccessMode? = nil,
+        paperImport: AIPaperImportMetadata? = nil
     ) {
         self.id = id
         self.title = title
@@ -240,6 +251,7 @@ public struct AIConversation: Codable, Sendable, Equatable, Identifiable {
         self.webConversationURL = webConversationURL
         self.reasoningEffort = reasoningEffort
         self.accessMode = accessMode
+        self.paperImport = paperImport
     }
 }
 

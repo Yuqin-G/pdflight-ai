@@ -765,9 +765,10 @@ enum PDFlightAppSelfChecks {
         let librarySidebar = LibrarySidebarView(store: libraryStore)
         guard librarySidebar.paperDraggingEnabledForLayoutCheck(),
               librarySidebar.multiplePaperSelectionEnabledForLayoutCheck(),
-              librarySidebar.recentHistoryStartsCollapsedForLayoutCheck() else {
+              librarySidebar.recentHistoryStartsExpandedForLayoutCheck(),
+              librarySidebar.unfiledStartsCollapsedForLayoutCheck() else {
             throw AppSelfCheckFailure(
-                description: "Library multi-selection or the collapsed Recent default is unavailable"
+                description: "Library multi-selection or the expanded Recent default is unavailable"
             )
         }
         print(
