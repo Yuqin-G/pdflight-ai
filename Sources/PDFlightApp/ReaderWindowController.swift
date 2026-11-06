@@ -257,6 +257,7 @@ enum ReaderSidebarResizeWorkPolicy {
 @MainActor
 final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageViewDelegate, NSSplitViewDelegate {
     var onClose: (() -> Void)?
+    var onRequestHostedClose: (() -> Void)?
     var onActivate: (() -> Void)?
     var onNavigateAIHistory: ((URL, String) -> Void)?
     var onOpenPaperFromLibrary: ((URL) -> Void)?
@@ -427,6 +428,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
         NotificationCenter.default.removeObserver(self)
     }
 
+    override func close() {
+        if window is ReaderWorkspaceWindow { onRequestHostedClose?() }
+        else { super.close() }
+    }
+
     override func showWindow(_ sender: Any?) {
         let wasVisible = window?.isVisible == true
         super.showWindow(sender)
@@ -512,7 +518,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
 
     /// Bare-E shortcut: silently no-ops when nothing is selected, unlike
     /// the menu item which beeps to explain why nothing happened.
-    private func highlightSelectionFromKey() {
+    func highlightSelectionFromKey() {
         guard canvasView.pageViews.contains(where: { $0.textSelection != nil }) else { return }
         highlightSelection(nil)
     }
@@ -1835,7 +1841,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                     ? nil
                     : await qwenConversationTitle()
                 let bridge = LocalWebBridge.shared
-                if let endpoint = bridge.bridgeEndpoint(from: configuration.baseURL),
+                if let endpoint = bridge.bridgeEndpoint(for: configuration),
                    !(await bridge.probe(endpoint)) {
                     aiSidebar.setActivity(.preparing, detail: "Starting local bridge…")
                     aiSidebar.setMessageActivity(
@@ -1844,9 +1850,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, PageVi
                         identity: providerIdentity
                     )
                 }
-                guard await bridge.ensureReady(for: configuration.baseURL) else {
+                guard await bridge.ensureReady(for: configuration) else {
+                    let port = bridge.bridgeEndpoint(for: configuration)?.port
+                    let address = port.map { "（127.0.0.1:\($0)）" } ?? ""
                     throw OpenAICompatibleError.invalidConfiguration(
-                        "Local web bridge did not start on \(configuration.baseURL). See uwa-lite.log in Application Support."
+                        "本地网页聊天服务\(address)未能启动，请稍后重试。"
                     )
                 }
                 let client = aiClient
@@ -2886,5 +2894,29 @@ private extension RenderedPage {
             throw DocumentEngineError.engineFailure("Could not create a macOS image from rendered pixels")
         }
         return NSImage(cgImage: image, size: pointSize)
+    }
+}
+
+@MainActor
+extension ReaderWindowController {
+    func prepareWorkspaceStateSelfCheck() async throws -> (@MainActor () async throws -> Void) {
+        if let loadTask { await loadTask.value }
+        aiSidebar.isHidden = false
+        let checkChat = try await aiSidebar.prepareWorkspaceSelfCheck()
+        let originalZoom = zoom
+        let originalPage = currentPage
+        let originalEngine = engine
+        return { [self] in
+            guard zoom == originalZoom, currentPage == originalPage, engine === originalEngine else {
+                throw NSError(domain: "WorkspaceStateCheck", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Switching must preserve PDF engine, page and zoom"])
+            }
+            try await checkChat()
+        }
+    }
+
+    func addWorkspaceAnnotationSelfCheck() async throws {
+        try await engine.add(.note(pageIndex: 0, point: PagePoint(x: 40, y: 40), contents: "Workspace close/save check"))
+        recordAnnotationAdded()
     }
 }

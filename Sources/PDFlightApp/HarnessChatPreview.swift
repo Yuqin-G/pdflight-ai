@@ -32,11 +32,10 @@ enum HarnessChatResourceLocator {
 /// The native sidebar remains responsible for input, history and execution.
 @MainActor
 final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHandler {
-    // Keep the renderer with its window. Moving a singleton between two visible
-    // sidebars blanks the previous window and carries the wrong scroll/zoom state.
-    private let rendererPool = HarnessChatWebViewPool()
+    private var webView: WKWebView?
     private let relay = HarnessPreviewRelay()
-    private var lease: HarnessChatWebViewPool.Lease?
+    private var isActive = false
+    private var savedScroll: [String: Any]?
     private var activationGeneration: UInt64 = 0
     private var isClosed = false
     private var isActivating = false
@@ -45,10 +44,13 @@ final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHan
     var onZoomChanged: ((CGFloat) -> Void)?
     var onRenderingStateChanged: ((Bool, String?) -> Void)?
     private var messages: [AIChatMessage] = []
+    private var messageRevision: UInt64 = 0
+    private var renderedRevision: UInt64?
     private var refreshWork: DispatchWorkItem?
     private let provider: HarnessPreviewResources
     private let resourceRoot: URL?
     private var readinessWatchdog: DispatchWorkItem?
+    var hasRenderingFailure: Bool { renderingFailure != nil }
     private var renderingFailure: String?
 
     override convenience init(frame: NSRect) {
@@ -70,11 +72,15 @@ final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHan
             renderingFailed("聊天显示资源缺失或不完整，已显示本地原生消息；历史记录和草稿未改动。")
             return
         }
-        if let lease, rendererPool.isCurrent(lease) { return }
+        isActive = true
+        if webView != nil {
+            if renderedRevision != messageRevision { refresh() }
+            return
+        }
         isActivating = true
         activationGeneration &+= 1
-        let generation = activationGeneration
         onRenderingStateChanged?(false, "聊天显示正在加载，暂用本地原生消息。")
+        let generation = activationGeneration
         let watchdog = DispatchWorkItem { [weak self] in
             guard let self, !isClosed, activationGeneration == generation else { return }
             renderingFailed("聊天网页初始化超时，已切回本地原生消息。")
@@ -82,64 +88,64 @@ final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHan
         readinessWatchdog?.cancel()
         readinessWatchdog = watchdog
         DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: watchdog)
-        Task { [weak self] in
-            guard let self else { return }
-            defer { isActivating = false }
-            guard !isClosed, activationGeneration == generation else { return }
-            do {
-                let next = try await rendererPool.attach(to: self, makeWebView: {
-                    let configuration = WKWebViewConfiguration()
-                    configuration.setURLSchemeHandler(self.provider, forURLScheme: "pdflight-chat")
-                    self.relay.target = self
-                    configuration.userContentController.add(self.relay, name: "harnessReady")
-                    configuration.userContentController.add(self.relay, name: "harnessZoom")
-                    configuration.userContentController.add(self.relay, name: "harnessFailure")
-                    configuration.userContentController.addUserScript(WKUserScript(source: """
-                        (() => {
-                          const fail = () => window.webkit?.messageHandlers?.harnessFailure?.postMessage('renderer-error');
-                          window.addEventListener('error', fail, true);
-                          window.addEventListener('unhandledrejection', fail);
-                        })();
-                        """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-                    let view = WKWebView(frame: .zero, configuration: configuration)
-                    return view
-                }, saveBeforeDetach: {})
-                guard !isClosed, activationGeneration == generation else {
-                    try? await rendererPool.detach(next)
-                    rendererPool.discardDetachedRenderer()
-                    return
-                }
-                lease = next
-                next.webView?.navigationDelegate = self
-                if next.webView?.url == nil {
-                    next.webView?.load(URLRequest(url: URL(string: "pdflight-chat://local/preview.html")!))
-                } else {
-                    refresh()
-                }
-            } catch {
-                renderingFailed("聊天网页无法启动，已切回本地原生消息。")
-            }
+        let configuration = WKWebViewConfiguration()
+        configuration.setURLSchemeHandler(provider, forURLScheme: "pdflight-chat")
+        relay.target = self
+        for name in ["harnessReady", "harnessZoom", "harnessFailure", "harnessScroll"] {
+            configuration.userContentController.add(relay, name: name)
         }
+        configuration.userContentController.addUserScript(WKUserScript(source: """
+            (() => {
+              const fail = () => window.webkit?.messageHandlers?.harnessFailure?.postMessage('renderer-error');
+              window.addEventListener('error', fail, true);
+              window.addEventListener('unhandledrejection', fail);
+
+            })();
+            """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        webView = view
+        view.navigationDelegate = self
+        view.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: leadingAnchor), view.trailingAnchor.constraint(equalTo: trailingAnchor),
+            view.topAnchor.constraint(equalTo: topAnchor), view.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        view.load(URLRequest(url: URL(string: "pdflight-chat://local/preview.html")!))
+        isActivating = false
+    }
+
+    func deactivate() {
+        isActive = false
+        refreshWork?.cancel()
+    }
+
+    /// Only the renderer is disposable. Messages, zoom and scroll belong to
+    /// this lightweight paper view; draft and stream ownership stays native.
+    func discardRenderer() {
+        activationGeneration &+= 1
+        refreshWork?.cancel()
+        readinessWatchdog?.cancel()
+        webView?.navigationDelegate = nil
+        webView?.stopLoading()
+        webView?.removeFromSuperview()
+        webView = nil
+        relay.target = nil
+        isReady = false
+        renderedRevision = nil
+        isActivating = false
+        renderingFailure = nil
     }
 
     func close() {
         isClosed = true
-        activationGeneration &+= 1
-        refreshWork?.cancel()
-        readinessWatchdog?.cancel()
-        relay.target = nil
+        isActive = false
+        discardRenderer()
         onZoomChanged = nil
         onRenderingStateChanged = nil
-        guard let lease else { return }
-        let pool = rendererPool
-        Task {
-            try? await pool.detach(lease)
-            pool.discardDetachedRenderer()
-        }
-        self.lease = nil
     }
 
-    func replace(_ values: [AIChatMessage]) { messages = values; scheduleRefresh() }
+    func replace(_ values: [AIChatMessage]) { savedScroll = nil; messages = values; scheduleRefresh() }
     func append(_ message: AIChatMessage) { messages.append(message); scheduleRefresh() }
     func update(id: String, content: String) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
@@ -159,6 +165,8 @@ final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHan
     func remove(id: String) { messages.removeAll { $0.id == id }; scheduleRefresh() }
 
     private func scheduleRefresh() {
+        messageRevision &+= 1
+        guard isActive, webView != nil else { return }
         refreshWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.refresh() }
         refreshWork = work
@@ -166,7 +174,7 @@ final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func refresh() {
-        guard isReady, let lease, rendererPool.isCurrent(lease), let view = lease.webView else { return }
+        guard isActive, isReady, let view = webView else { return }
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(messages),
               let object = try? JSONSerialization.jsonObject(with: data) else {
@@ -174,10 +182,12 @@ final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHan
             return
         }
         let generation = activationGeneration
-        view.callAsyncJavaScript("if (typeof window.PDFlightReplaceMessages !== 'function') return false; window.PDFlightReplaceMessages(messages); return true;", arguments: ["messages": object], in: nil, in: .page) { result in
+        let revision = messageRevision
+        view.callAsyncJavaScript("if (typeof window.PDFlightReplaceMessages !== 'function') return false; window.PDFlightReplaceMessages(messages, position); return true;", arguments: ["messages": object, "position": savedScroll as Any? ?? NSNull()], in: nil, in: .page) { result in
             guard !self.isClosed, self.activationGeneration == generation, self.isReady else { return }
             switch result {
             case .success(let value) where value as? Bool == true:
+                self.renderedRevision = revision
                 self.readinessWatchdog?.cancel()
                 self.onRenderingStateChanged?(true, nil)
             default:
@@ -188,21 +198,20 @@ final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHan
 
     func renderingFailed(_ explanation: String) {
         guard !isClosed else { return }
+        discardRenderer()
         renderingFailure = explanation
-        isReady = false
-        activationGeneration &+= 1
-        readinessWatchdog?.cancel()
-        refreshWork?.cancel()
-        lease?.webView?.stopLoading()
         onRenderingStateChanged?(false, explanation)
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard !isClosed, renderingFailure == nil else { return }
+        guard !isClosed, renderingFailure == nil, message.webView === webView else { return }
         if message.name == "harnessReady" {
             isReady = true
             applyZoom()
             refresh()
+        } else if message.name == "harnessScroll", isActive, renderedRevision != nil,
+                  let body = message.body as? [String: Any] {
+            savedScroll = body["position"] as? [String: Any]
         } else if message.name == "harnessFailure" {
             renderingFailed("聊天网页脚本或资源加载失败，已切回本地原生消息。")
         } else if message.name == "harnessZoom",
@@ -221,7 +230,7 @@ final class HarnessChatPreview: NSView, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func applyZoom() {
-        guard isReady, let lease, rendererPool.isCurrent(lease), let view = lease.webView else { return }
+        guard isActive, isReady, let view = webView else { return }
         view.callAsyncJavaScript("window.__setChatZoom?.(zoom)", arguments: ["zoom": Double(requestedZoom)], in: nil, in: .page) { result in
             if case .failure(let error) = result { NSLog("Harness preview zoom failed: %@", error.localizedDescription) }
         }
@@ -266,4 +275,66 @@ private final class HarnessPreviewResources: NSObject, WKURLSchemeHandler {
         task.didReceive(response); task.didReceive(data); task.didFinish()
     }
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+}
+
+@MainActor
+extension HarnessChatPreview {
+    /// Integration probe: use the live renderer and DOM, not just resource paths.
+    func workspaceRenderingSelfCheck(expectedText: String) async throws -> ObjectIdentifier {
+        for _ in 0..<120 {
+            if let renderingFailure {
+                throw NSError(domain: "WorkspaceChatCheck", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: renderingFailure])
+            }
+            if isReady, let view = webView,
+               let text = try? await view.evaluateJavaScript("document.body.innerText") as? String,
+               text.contains(expectedText) {
+                guard view.window === window, window != nil, !isHidden else {
+                    throw NSError(domain: "WorkspaceChatCheck", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Live chat renderer must remain attached and visible"])
+                }
+                return ObjectIdentifier(view)
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw NSError(domain: "WorkspaceChatCheck", code: 3,
+            userInfo: [NSLocalizedDescriptionKey: "Live renderer did not display the synthetic saved answer"])
+    }
+}
+
+@MainActor
+extension HarnessChatPreview {
+    var savedPositionForSelfCheck: [String: Any]? { savedScroll }
+    var hasSavedScrollForSelfCheck: Bool { savedScroll != nil }
+    var rendererIdentityForSelfCheck: ObjectIdentifier? { webView.map(ObjectIdentifier.init) }
+
+    /// Pump only the isolated check's run loop; production never blocks for JS.
+    func waitForSelfCheck(_ script: String, matches: (Any?) -> Bool) throws {
+        let deadline = Date().addingTimeInterval(12)
+        var pending = false
+        var result: Result<Any, Error>?
+        while Date() < deadline {
+            if let renderingFailure {
+                throw NSError(domain: "ChatWebCacheCheck", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: renderingFailure])
+            }
+            if let result {
+                switch result {
+                case .success(let value): if matches(value) { return }
+                case .failure(let error): throw error
+                }
+            }
+            if isReady, !pending, let webView {
+                pending = true
+                result = nil
+                webView.evaluateJavaScript(script) { value, error in
+                    result = error.map { .failure($0) } ?? .success(value ?? NSNull())
+                    pending = false
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        throw NSError(domain: "ChatWebCacheCheck", code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for synthetic renderer state: \(script); last result: \(String(describing: result)); scroll: \(String(describing: savedScroll))"])
+    }
 }

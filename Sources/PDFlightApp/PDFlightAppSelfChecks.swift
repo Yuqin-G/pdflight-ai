@@ -206,17 +206,6 @@ enum PDFlightAppSelfChecks {
                 description: "Reply gesture zoom is not disabled by default"
             )
         }
-        guard !ReaderSessionRestorePreference.isEnabled(defaults: widthDefaults) else {
-            throw AppSelfCheckFailure(
-                description: "Restoring the last session is unexpectedly enabled before the user chooses it"
-            )
-        }
-        ReaderSessionRestorePreference.setEnabled(true, defaults: widthDefaults)
-        guard ReaderSessionRestorePreference.isEnabled(defaults: widthDefaults) else {
-            throw AppSelfCheckFailure(
-                description: "The restore-last-session option does not survive relaunch"
-            )
-        }
         AIReplyGestureZoomPreference.setEnabled(
             true,
             defaults: widthDefaults,

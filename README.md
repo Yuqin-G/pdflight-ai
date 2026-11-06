@@ -6,7 +6,7 @@ A lightweight macOS PDF reader with a paper library and an Ask PDF sidebar.
 Requires macOS 14+ and Apple Silicon.
 
 - PDF search, outlines, highlights, notes, and saved reading positions.
-- Nested library collections and tabbed papers.
+- Nested library collections and tabbed papers. Every launch restores all groups' open PDFs, tab order, and selected papers, starting in Default; PDFs opened from Finder or the command line are merged into that restored workspace.
 - Harness-style chat typography, tables, math, and independent reading zoom.
 - Fixed-size message composer, PDF/image attachments, and per-paper conversations.
 - OpenAI-compatible API and supported web chat providers; credentials stay local.

@@ -24,33 +24,23 @@ enum ReaderCopyRouting {
     }
 }
 
-enum ReaderSessionRestorePreference {
-    static let defaultsKey = "reader.restoreLastSession"
-
-    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: defaultsKey) as? Bool ?? false
-    }
-
-    static func setEnabled(_ enabled: Bool, defaults: UserDefaults = .standard) {
-        defaults.set(enabled, forKey: defaultsKey)
-    }
-}
-
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private var readers: [ReaderWindowController] = []
     private var readerGroupIDs: [ObjectIdentifier: String] = [:]
     private var activeReaders: [String: ReaderWindowController] = [:]
-    // AppKit can detach tabs when their windows are ordered out. Keep an independent
-    // order, captured while the complete native group is still on screen.
+    // The app-owned document strip is the sole source of document order.
     private var readerOrder: [String: [ObjectIdentifier]] = [:]
     private var activeGroupID = ReaderTabGroups.defaultID
     private var groupLibrary = PaperLibrarySnapshot()
     private var groupToolbars: [ObjectIdentifier: ReaderGroupToolbar] = [:]
     private var emptyGroupWindow: EmptyReaderGroupWindow?
+    private let workspace = ReaderWorkspacePresentation()
     private var isSwitchingGroup = false
     private var isRestoringGroups = false
     private var canSaveSession = true
+    private var hasCompletedStartup = false
+    private var pendingExternalDocuments: [URL] = []
     private var libraryReloadGeneration = 0
     private let readingPositionStore = ReadingPositionStore(fileURL: AppDelegate.readingStateURL)
     private let paperLibraryStore = PaperLibraryStore(fileURL: AppDelegate.paperLibraryURL)
@@ -202,17 +192,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                                                name: .paperLibraryDidChange, object: nil)
         Task { [weak self] in
             guard let self else { return }
-            groupLibrary = (try? await paperLibraryStore.snapshot()) ?? PaperLibrarySnapshot()
             let PDFs = CommandLine.arguments.dropFirst().map(URL.init(fileURLWithPath:))
                 .filter { $0.pathExtension.lowercased() == "pdf" }
-            if PDFs.isEmpty {
-                if !restoreLastSessionIfEnabled() { selectGroup(ReaderTabGroups.defaultID) }
-            } else {
-                PDFs.forEach(open)
-            }
+            await completeStartup(opening: PDFs)
             startPaperImportQueue()
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    /// Load before any open/save can replace the previous process's full session.
+    private func completeStartup(opening commandLineDocuments: [URL] = []) async {
+        guard !hasCompletedStartup, !isTerminating else { return }
+        groupLibrary = (try? await paperLibraryStore.snapshot()) ?? PaperLibrarySnapshot()
+        guard !isTerminating else { return }
+        if !restoreLastSession() { selectGroup(ReaderTabGroups.defaultID) }
+        let documents = commandLineDocuments + pendingExternalDocuments
+        pendingExternalDocuments.removeAll()
+        documents.forEach(open)
+        hasCompletedStartup = true
+        saveCurrentSession()
+    }
+
+    private func openExternalDocuments(_ urls: [URL]) {
+        let PDFs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+        guard !isTerminating else { return }
+        guard hasCompletedStartup else {
+            pendingExternalDocuments.append(contentsOf: PDFs)
+            return
+        }
+        PDFs.forEach(open)
     }
 
     private func importHarnessChatZoomIfNeeded() {
@@ -259,14 +267,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func applicationWillTerminate(_ notification: Notification) {
         paperImportTask?.cancel()
-        readers.forEach { $0.saveReadingPosition() }
-        if !isTerminating { saveCurrentSession() }
-        isTerminating = true
+        prepareForTermination()
         LocalWebBridge.shared.shutdownOwned()
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        filenames.map(URL.init(fileURLWithPath:)).forEach(open)
+        openExternalDocuments(filenames.map(URL.init(fileURLWithPath:)))
         sender.reply(toOpenOrPrint: .success)
     }
 
@@ -297,20 +303,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
     }
 
-    @objc private func toggleRestoreLastSession(_ sender: NSMenuItem) {
-        let enabled = !ReaderSessionRestorePreference.isEnabled()
-        ReaderSessionRestorePreference.setEnabled(enabled)
-        sender.state = enabled ? .on : .off
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        prepareForTermination()
+        return .terminateNow
+    }
+
+    private func prepareForTermination() {
+        guard !isTerminating else { return }
+        // Snapshot before AppKit closes the host or invokes document close callbacks.
+        saveCurrentSession()
+        isTerminating = true
+        readers.forEach { $0.saveReadingPosition() }
     }
 
     @objc private func quitApplication(_ sender: Any?) {
-        saveCurrentSession()
-        isTerminating = true
         NSApplication.shared.terminate(sender)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            // If an unsaved-annotation prompt cancelled termination, normal session updates resume.
-            self?.isTerminating = false
-        }
     }
 
     @objc func saveDocument(_ sender: Any?) {
@@ -465,15 +472,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             recordOpenedDocument(normalizedURL)
             activeReaders[groupID] = existing
             if let conversationID { existing.selectAIConversation(conversationID) }
-            existing.window?.makeKeyAndOrderFront(nil)
+            presentReader(existing)
             saveCurrentSession()
             return
         }
         do {
             guard let engine = try preparedEngine ?? openEngine(for: normalizedURL) else { return }
-            let tabHost = activeReaders[groupID]?.window
-                ?? readers.last(where: { self.groupID(for: $0) == groupID })?.window
-                ?? (emptyGroupWindow?.window?.isVisible == true ? emptyGroupWindow?.window : nil)
             let reader = ReaderWindowController(
                 url: normalizedURL,
                 engine: engine,
@@ -488,14 +492,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                 let id = self.groupID(for: reader)
                 self.readers.removeAll { $0 === reader }
                 self.readerGroupIDs.removeValue(forKey: ObjectIdentifier(reader))
-                if let window = reader.window { self.groupToolbars.removeValue(forKey: ObjectIdentifier(window)) }
+                self.workspace.remove(reader)
                 if self.activeReaders[id] === reader { self.activeReaders[id] = self.readers.last { self.groupID(for: $0) == id } }
                 if !self.isTerminating && !self.isSwitchingGroup {
                     self.saveCurrentSession()
-                    if self.readers.allSatisfy({ self.groupID(for: $0) != self.activeGroupID }) {
-                        self.selectGroup(self.activeGroupID)
-                    }
+                    self.selectGroup(self.activeGroupID)
                 }
+            }
+            reader.onRequestHostedClose = { [weak self, weak reader] in
+                guard let self, let reader else { return }
+                self.workspace.remove(reader)
+                reader.close()
             }
             reader.onActivate = { [weak self, weak reader] in
                 guard let self, let reader, !isTerminating, !isSwitchingGroup else { return }
@@ -516,33 +523,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             readerGroupIDs[ObjectIdentifier(reader)] = groupID
             readers.append(reader)
             activeReaders[groupID] = reader
-            if let window = reader.window {
-                window.tabbingIdentifier = "PDFlight." + groupID
-                window.tabbingMode = .disallowed
-                installGroupToolbar(on: window)
-            }
-            if let tabHost, let newWindow = reader.window {
-                NSDisableScreenUpdates()
-                tabHost.addTabbedWindow(newWindow, ordered: .above)
-                newWindow.tabGroup?.selectedWindow = newWindow
-                newWindow.makeKeyAndOrderFront(nil)
-                if let empty = emptyGroupWindow?.window {
-                    empty.tabGroup?.removeWindow(empty)
-                    empty.orderOut(nil)
-                }
-                NSEnableScreenUpdates()
-            } else {
-                reader.showWindow(nil)
-                let storedFullScreen = UserDefaults.standard.object(
-                    forKey: ReaderWindowController.windowFullScreenDefaultsKey
-                ) as? Bool
-                // First launch defaults to full screen; after that the
-                // last state the user chose is what gets restored.
-                if (storedFullScreen ?? true), !isRestoringGroups, ProcessInfo.processInfo.environment["PDFLIGHT_GROUP_SELF_CHECK"] != "1", let window = reader.window {
-                    DispatchQueue.main.async {
-                        guard !window.styleMask.contains(.fullScreen) else { return }
-                        window.toggleFullScreen(nil)
-                    }
+            reader.window?.tabbingMode = .disallowed
+            let wasVisible = workspace.window.isVisible
+            presentReader(reader)
+            let storedFullScreen = UserDefaults.standard.object(
+                forKey: ReaderWindowController.windowFullScreenDefaultsKey
+            ) as? Bool
+            if !wasVisible, (storedFullScreen ?? true), !isRestoringGroups,
+               ProcessInfo.processInfo.environment["PDFLIGHT_GROUP_SELF_CHECK"] != "1" {
+                let window = workspace.window
+                DispatchQueue.main.async {
+                    guard !window.styleMask.contains(.fullScreen) else { return }
+                    window.toggleFullScreen(nil)
                 }
             }
             captureVisibleGroupOrder()
@@ -617,7 +609,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
         let apiKey = try await aiConfigurationStore.apiKeyAsync(for: route)
         try Task.checkCancellation()
-        guard await LocalWebBridge.shared.ensureReady(for: configuration.baseURL) else {
+        guard await LocalWebBridge.shared.ensureReady(for: configuration) else {
             throw PaperImportFailure("当前模型的本地聊天路由无法启动。")
         }
         let content = request.prompt + "\n\n阅读范围（必须在回答中明确，不得宣称超出此范围的全文阅读）：\n" + input.scope
@@ -670,12 +662,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         bar.onSelectDocument = { [weak self] id in
             guard let self, let reader = readers.first(where: { documentTabID($0) == id && groupID(for: $0) == activeGroupID }) else { return }
             activeReaders[activeGroupID] = reader
-            reader.window?.makeKeyAndOrderFront(nil)
+            presentReader(reader)
             saveCurrentSession()
         }
         bar.onCloseDocument = { [weak self] id in
             guard let self else { return }
-            readers.first { documentTabID($0) == id }?.window?.performClose(nil)
+            guard let reader = readers.first(where: { documentTabID($0) == id }) else { return }
+            closeReader(reader)
         }
         bar.onReorderDocuments = { [weak self] ids in
             guard let self else { return }
@@ -704,13 +697,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                               isSelected: activeReaders[activeGroupID] === reader)
         }
         for bar in groupToolbars.values { bar.updateDocuments(tabs) }
-        // The app-owned lower strip is the actual document-tab drag source. Keep
-        // AppKit's public container for seamless content switching, hiding its bar.
-        for reader in readers {
-            if let window = reader.window, window.tabGroup?.isTabBarVisible == true {
-                window.toggleTabBar(nil)
-            }
-        }
+
     }
 
     private func moveDocumentTab(_ documentID: String, to targetID: String) {
@@ -749,10 +736,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
     }
 
-    private func hideEmptyGroupWindow() {
-        emptyGroupWindow?.window?.orderOut(nil)
-    }
-
     private func orderedReaders(in id: String) -> [ReaderWindowController] {
         let members = readers.filter { groupID(for: $0) == id }
         let saved = (readerOrder[id] ?? []).compactMap { identity in
@@ -762,16 +745,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     private func captureVisibleGroupOrder() {
-        // The visible document strip owns order; native container order is hidden.
+        // The app-owned document strip is the source of order for every group.
         readerOrder[activeGroupID] = orderedReaders(in: activeGroupID).map(ObjectIdentifier.init)
     }
 
-    private func restoreNativeTabs(in id: String) {
-        let windows = orderedReaders(in: id).compactMap(\.window)
-        guard let first = windows.first, windows.count > 1 else { return }
-        for window in windows.dropFirst() where window.tabGroup == nil || window.tabGroup !== first.tabGroup {
-            first.addTabbedWindow(window, ordered: .above)
+    private func prepareWorkspace() {
+        let window = workspace.window
+        if groupToolbars[ObjectIdentifier(window)] == nil { installGroupToolbar(on: window) }
+        window.onCloseDocument = { [weak self] in
+            guard let self else { return }
+            if let reader = workspace.selectedController as? ReaderWindowController {
+                closeReader(reader)
+            } else if let empty = emptyGroupWindow {
+                workspace.remove(empty)
+                empty.close()
+                workspace.window.closeWorkspace()
+            }
         }
+    }
+
+    private func closeReader(_ reader: ReaderWindowController) {
+        guard let window = reader.window, reader.windowShouldClose(window) else { return }
+        reader.close()
+    }
+
+    private func presentReader(_ reader: ReaderWindowController) {
+        prepareWorkspace()
+        workspace.show(reader)
     }
 
     private func selectGroup(_ requestedID: String, rememberingCurrent: Bool = true) {
@@ -782,55 +782,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let id = validIDs.contains(requestedID) ? requestedID : ReaderTabGroups.defaultID
         captureVisibleGroupOrder()
         if rememberingCurrent, let reader = keyReader { activeReaders[activeGroupID] = reader }
-        let visibleHost = readers.first { $0.window?.isKeyWindow == true }?.window
-            ?? (emptyGroupWindow?.window?.isVisible == true ? emptyGroupWindow?.window : nil)
         activeGroupID = id
-        // Exchange tabs inside the live AppKit container before retiring the old
-        // members. Never order out the visible host and then create a new one.
-        NSDisableScreenUpdates()
-        defer { NSEnableScreenUpdates() }
-        let target: NSWindow?
-        if let reader = activeReaders[id] ?? readers.first(where: { groupID(for: $0) == id }) {
+        prepareWorkspace()
+        if let reader = activeReaders[id] ?? orderedReaders(in: id).first {
             activeReaders[id] = reader
-            target = reader.window
+            workspace.show(reader)
         } else {
             let empty = emptyGroupWindow ?? EmptyReaderGroupWindow(store: paperLibraryStore)
             empty.library.onOpenPaper = { [weak self] url in self?.openFromLibrary(url) }
             empty.onActivate = { [weak self] in self?.saveCurrentSession() }
             empty.onClose = { [weak self] in
                 guard let self else { return }
-                if let window = emptyGroupWindow?.window { groupToolbars.removeValue(forKey: ObjectIdentifier(window)) }
+                if let empty = emptyGroupWindow { workspace.remove(empty) }
                 emptyGroupWindow = nil
                 saveCurrentSession()
             }
             emptyGroupWindow = empty
-            if let window = empty.window, groupToolbars[ObjectIdentifier(window)] == nil { installGroupToolbar(on: window) }
-            target = empty.window
+            workspace.show(empty)
         }
-        let targetWindows = orderedReaders(in: id).compactMap(\.window)
-        let incoming = targetWindows.isEmpty ? [target].compactMap { $0 } : targetWindows
-        if let visibleHost, let target, visibleHost !== target {
-            var previous = visibleHost
-            for window in incoming where window.tabGroup !== visibleHost.tabGroup || window.tabGroup == nil {
-                previous.addTabbedWindow(window, ordered: .above)
-                previous = window
-            }
-            visibleHost.tabGroup?.selectedWindow = target
-            target.makeKeyAndOrderFront(nil)
-        } else { target?.makeKeyAndOrderFront(nil) }
-        for reader in readers where groupID(for: reader) != id {
-            if let window = reader.window {
-                window.tabGroup?.removeWindow(window)
-                window.orderOut(nil)
-            }
-        }
-        if let empty = emptyGroupWindow?.window, empty !== target {
-            empty.tabGroup?.removeWindow(empty)
-            empty.orderOut(nil)
-        }
-        restoreNativeTabs(in: id)
-        target?.tabGroup?.selectedWindow = target
-        target?.makeKeyAndOrderFront(nil)
         for bar in groupToolbars.values { bar.update(library: groupLibrary, selectedID: id) }
         saveCurrentSession()
     }
@@ -861,12 +830,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             let shouldMove = !validIDs.contains(oldID) || (wasKnown && oldID == oldDestination && oldDestination != destination)
             guard shouldMove else { continue }
             moved = true
-            if let window = reader.window { window.tabGroup?.removeWindow(window) }
             if activeReaders[oldID] === reader { activeReaders[oldID] = nil }
             readerGroupIDs[ObjectIdentifier(reader)] = destination
-            reader.window?.tabbingIdentifier = "PDFlight." + destination
-            if let host = readers.first(where: { $0 !== reader && groupID(for: $0) == destination })?.window,
-               let window = reader.window { host.addTabbedWindow(window, ordered: .above) }
             if activeReaders[destination] == nil { activeReaders[destination] = reader }
         }
         activeReaders = activeReaders.filter { validIDs.contains($0.key) && groupID(for: $0.value) == $0.key }
@@ -877,8 +842,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     private func saveCurrentSession() {
+        guard hasCompletedStartup, !isRestoringGroups, !isTerminating, canSaveSession else { return }
         refreshDocumentTabs()
-        guard !isRestoringGroups, canSaveSession else { return }
         captureVisibleGroupOrder()
         let groups = ReaderTabGroups.orderedIDs(in: groupLibrary).map { id in
             let urls = orderedReaders(in: id).map(\.documentURL)
@@ -888,8 +853,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         try? readerSessionStore.save(groups: groups, activeGroupID: activeGroupID)
     }
 
-    private func restoreLastSessionIfEnabled(enabled: Bool? = nil) -> Bool {
-        guard (enabled ?? ReaderSessionRestorePreference.isEnabled()) else { return false }
+    private func restoreLastSession() -> Bool {
         let state: ReaderSessionState
         do {
             state = try readerSessionStore.state()
@@ -1004,13 +968,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             keyEquivalent: ","
         )
         aiSettings.target = self
-        let restoreSession = applicationMenu.addItem(
-            withTitle: "Restore Last Session at Launch",
-            action: #selector(toggleRestoreLastSession(_:)),
-            keyEquivalent: ""
-        )
-        restoreSession.target = self
-        restoreSession.state = ReaderSessionRestorePreference.isEnabled() ? .on : .off
         applicationMenu.addItem(.separator())
         let quit = applicationMenu.addItem(
             withTitle: "Quit PDFlight",
@@ -1117,6 +1074,11 @@ extension AppDelegate {
         func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
             if !condition() { throw Failure(description: message) }
         }
+        guard let isolatedHome = ProcessInfo.processInfo.environment["PDFLIGHT_SELF_CHECK_HOME"],
+              FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path == URL(fileURLWithPath: isolatedHome).standardizedFileURL.path,
+              Bundle.main.bundleIdentifier?.hasPrefix("dev.pdflight.session-check.") == true else {
+            throw Failure(description: "Run Scripts/check-session-restore.sh to isolate HOME, defaults and all state before this check")
+        }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pdflight-group-ui-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1126,15 +1088,26 @@ extension AppDelegate {
             "PDFLIGHT_READER_SESSION_FILE": directory.appendingPathComponent("session.json").path,
             "PDFLIGHT_AI_HISTORY_DIRECTORY": directory.appendingPathComponent("chats").path,
             "PDFLIGHT_AI_SETTINGS_SUITE": "pdflight.group-ui.\(UUID().uuidString)",
+            "PDFLIGHT_AI_KEYCHAIN_SERVICE": "pdflight.group-ui.\(UUID().uuidString)",
             "PDFLIGHT_SKIP_HARNESS_MODEL_IMPORT": "1",
             "PDFLIGHT_GROUP_SELF_CHECK": "1"
         ]
         for (key, value) in overrides { setenv(key, value, 1) }
         defer { for key in overrides.keys { unsetenv(key) } }
+        let windowDefaults = [ReaderWindowController.windowFrameDefaultsKey,
+                              ReaderWindowController.windowFullScreenDefaultsKey]
+        let originalDefaults = windowDefaults.map { ($0, UserDefaults.standard.object(forKey: $0)) }
+        defer {
+            for (key, value) in originalDefaults {
+                if let value { UserDefaults.standard.set(value, forKey: key) }
+                else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+        }
         NSWindow.allowsAutomaticWindowTabbing = false
         let first = directory.appendingPathComponent("first.pdf")
         let second = directory.appendingPathComponent("second.pdf")
-        for url in [first, second] {
+        let third = directory.appendingPathComponent("third.pdf")
+        for url in [first, second, third] {
             var box = CGRect(x: 0, y: 0, width: 400, height: 600)
             guard let context = CGContext(url as CFURL, mediaBox: &box, nil) else { throw Failure(description: "Could not make PDF fixture") }
             context.beginPDFPage(nil)
@@ -1144,6 +1117,7 @@ extension AppDelegate {
             context.closePDF()
         }
         let app = AppDelegate()
+        app.hasCompletedStartup = true
         NotificationCenter.default.addObserver(app, selector: #selector(groupLibraryChanged(_:)), name: .paperLibraryDidChange, object: nil)
         defer { NotificationCenter.default.removeObserver(app) }
         app.isRestoringGroups = true
@@ -1175,25 +1149,45 @@ extension AppDelegate {
         try require(owned !== external, "Same PDF in different groups must have independent readers")
         app.open(second)
         let secondReader = app.activeReaders[aID]!
-        try require(owned.window?.tabGroup === secondReader.window?.tabGroup, "Documents within a group must share a native tab group")
-        try require(owned.window?.tabGroup?.windows.count == 2, "Native document tab group must contain both documents")
+        let host = app.workspace.window
+        let hostNumber = host.windowNumber
+        let hostFrame = host.frame
+        let hostContent = host.contentView!
+        func requireNoNativeTabs(_ owner: AppDelegate) throws {
+            try require(owner.workspace.window.tabGroup == nil, "Workspace must never create a native tab group")
+            try require(owner.readers.allSatisfy { $0.window?.tabGroup == nil && $0.window?.tabbingMode == .disallowed }, "All document windows must disallow native tabs")
+            try require(owner.groupToolbars.count == 1, "Only the stable host may own the two app tab strips")
+        }
+        try requireNoNativeTabs(app)
         app.open(first)
-        try require(app.readers.count == 3 && app.activeReaders[aID] === owned, "Same-group reuse must select the existing native document tab")
-        let aWindows = owned.window!.tabGroup!
-        aWindows.removeWindow(secondReader.window!)
-        aWindows.insertWindow(secondReader.window!, at: 0)
-        owned.window!.makeKeyAndOrderFront(nil)
-        try require(aWindows.windows.elementsEqual([secondReader.window!, owned.window!], by: { $0 === $1 }), "Native reorder must change A's document order")
+        try require(app.readers.count == 3 && app.activeReaders[aID] === owned, "Same-group reuse must select the existing document")
+        let roots = hostContent.subviews
+        try await Task.sleep(for: .milliseconds(300))
+        fputs("CHECK: live chat rendering\n", stderr)
+        let checkReadingState = try await owned.prepareWorkspaceStateSelfCheck()
+        fputs("CHECK: live chat ready\n", stderr)
+        initialToolbar.onReorderDocuments?([app.documentTabID(secondReader), app.documentTabID(owned)])
+        initialToolbar.onSelectDocument?(app.documentTabID(secondReader))
+        try require(secondReader.window === host, "App-owned document strip must select within the stable host")
+        initialToolbar.onSelectDocument?(app.documentTabID(owned))
         app.open(first, in: bID)
         let bReader = app.activeReaders[bID]!
         try await Task.sleep(for: .milliseconds(100))
-        try require(bReader.window!.isVisible && !owned.window!.isVisible && !secondReader.window!.isVisible, "Only B must be visible after switching away from reordered A")
+        try require(bReader.window === host && !owned.window!.isVisible && !secondReader.window!.isVisible, "Only B must be presented after switching away from reordered A")
+        for _ in 0..<12 {
+            app.selectGroup(aID)
+            try require(app.activeReaders[aID] === owned && owned.window === host, "A must restore its selected document")
+            try require(app.orderedReaders(in: aID).elementsEqual([secondReader, owned], by: { $0 === $1 }), "A must retain its document order")
+            try require(host.windowNumber == hostNumber && host.frame == hostFrame && host.contentView === hostContent, "Switching must retain the native window, frame and content container")
+            try require(roots.allSatisfy { $0.window === host }, "Existing document and chat roots must remain attached to the host")
+            try requireNoNativeTabs(app)
+            app.selectGroup(bID)
+            try requireNoNativeTabs(app)
+        }
         app.selectGroup(aID)
-        try await Task.sleep(for: .milliseconds(100))
-        try require(owned.window!.tabGroup != nil && owned.window!.tabGroup === secondReader.window!.tabGroup && owned.window!.tabGroup?.windows.count == 2, "A must retain both native tab members after A-B-A")
-        try require(owned.window!.tabGroup!.windows.elementsEqual([secondReader.window!, owned.window!], by: { $0 === $1 }), "A must retain its reordered native tabs after A-B-A")
-        try require(app.activeReaders[aID] === owned && owned.window!.tabGroup!.selectedWindow === owned.window!, "A must restore its selected native tab after A-B-A")
-        try require(owned.window!.isVisible && !bReader.window!.isVisible, "Returning to A must show its active window and hide B")
+        try await checkReadingState()
+        try require(host.delegate === owned, "Visible reader must own native window delegation")
+        try require(owned.window!.isVisible && !bReader.window!.isVisible, "Returning to A must show A and hide B")
         bReader.close()
         NSApplication.shared.activate(ignoringOtherApps: true)
         try await Task.sleep(for: .milliseconds(250))
@@ -1231,24 +1225,181 @@ extension AppDelegate {
         try await app.paperLibraryStore.movePaper(paper.id, to: b.id)
         app.reconcileLibrary(try await app.paperLibraryStore.snapshot())
         try require(app.groupID(for: owned) == bID && app.groupID(for: external) == emptyID, "Library moves must move the owned tab while preserving explicitly opened tabs in other groups")
-        try require(secondReader.window?.tabGroup?.windows.contains(where: { $0 === owned.window }) != true, "A moved document must be detached from its old native tab group")
+        try requireNoNativeTabs(app)
+        // Persist two documents in B so restoration also exercises a multi-PDF group.
+        app.open(second, in: bID)
+        app.open(first, in: bID)
         app.selectGroup(aID)
         app.isRestoringGroups = false
         app.saveCurrentSession()
         let saved = try app.readerSessionStore.state()
         try require(saved.activeGroupID == aID && saved.groups.first(where: { $0.id == aID })?.activeDocumentPath == second.path, "Saved session must retain the current group and that group's selected tab")
+        // Exercise the real launch/open/terminate delegates against independent on-disk sessions.
+        let baselineData = try Data(contentsOf: directory.appendingPathComponent("session.json"))
+        func makeLaunch(_ name: String, data: Data?) throws -> (AppDelegate, URL) {
+            let file = directory.appendingPathComponent("\(name)-session.json")
+            if let data { try data.write(to: file) }
+            setenv("PDFLIGHT_READER_SESSION_FILE", file.path, 1)
+            defer { setenv("PDFLIGHT_READER_SESSION_FILE", overrides["PDFLIGHT_READER_SESSION_FILE"]!, 1) }
+            return (AppDelegate(), file)
+        }
+        func closeFixture(_ owner: AppDelegate) {
+            owner.isTerminating = true
+            owner.isSwitchingGroup = true
+            for reader in owner.readers { reader.close() }
+            owner.emptyGroupWindow?.close()
+        }
+        UserDefaults.standard.set(false, forKey: "reader.restoreLastSession")
+        for (name, arguments, early) in [
+            ("plain", [URL](), [URL]()),
+            ("command-line", [third, first], [URL]()),
+            ("finder-before-launch", [URL](), [third, first, third]),
+            ("combined", [third, first], [first, third])
+        ] {
+            let (launch, file) = try makeLaunch(name, data: baselineData)
+            defer { closeFixture(launch) }
+            if !early.isEmpty { launch.application(NSApp, openFiles: early.map(\.path)) }
+            launch.saveCurrentSession()
+            let beforeStartup = try Data(contentsOf: file)
+            try require(beforeStartup == baselineData && launch.readers.isEmpty,
+                        "\(name): pre-launch open/save must not replace the previous session")
+            await launch.completeStartup(opening: arguments)
+            let hasExternal = !arguments.isEmpty || !early.isEmpty
+            try require(launch.readers.count == (hasExternal ? 6 : 4),
+                        "\(name): startup must restore every group before merging external PDFs")
+            try require(launch.activeGroupID == ReaderTabGroups.defaultID,
+                        "\(name): startup must land in Default")
+            for group in saved.groups where group.id != ReaderTabGroups.defaultID {
+                try require(launch.orderedReaders(in: group.id).map(\.documentURL.path) == group.documentPaths,
+                            "\(name): every background group's ordered PDFs must survive")
+                try require(launch.activeReaders[group.id]?.documentURL.path == group.activeDocumentPath,
+                            "\(name): each group's selected PDF must survive")
+            }
+            try require(launch.orderedReaders(in: ReaderTabGroups.defaultID).map(\.documentURL) == (hasExternal ? [third, first] : []),
+                        "\(name): duplicate startup open events must reuse tabs without reordering them")
+            try requireNoNativeTabs(launch)
+            launch.selectGroup(bID)
+            let beforeLateOpen = launch.readers.count
+            launch.application(NSApp, openFiles: [second.path, second.path])
+            try require(launch.readers.count == beforeLateOpen && launch.activeReaders[bID]?.documentURL == second,
+                        "\(name): a late Finder open must reuse the active group's PDF")
+            if name == "plain" {
+                // Also cover termination notifications without the menu action/delegate preflight.
+                launch.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+                try require(launch.isTerminating, "Direct termination must freeze the full session")
+            } else {
+                try require(launch.applicationShouldTerminate(NSApp) == .terminateNow && launch.isTerminating,
+                            "\(name): all quit routes must freeze the session before window teardown")
+            }
+            let atQuit = try Data(contentsOf: file)
+            let quitState = try launch.readerSessionStore.state()
+            try require(quitState.documentURLs.count == beforeLateOpen && quitState.activeGroupID == bID,
+                        "\(name): quit must snapshot all groups while their readers still exist")
+            for reader in launch.readers { reader.close() }
+            launch.saveCurrentSession()
+            launch.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            let afterTeardown = try Data(contentsOf: file)
+            try require(afterTeardown == atQuit, "\(name): close callbacks and repeated quit hooks must never overwrite the frozen session")
+            let (nextLaunch, _) = try makeLaunch("\(name)-reopened", data: atQuit)
+            defer { closeFixture(nextLaunch) }
+            await nextLaunch.completeStartup()
+            try require(nextLaunch.readers.count == beforeLateOpen && nextLaunch.activeGroupID == ReaderTabGroups.defaultID,
+                        "\(name): CmdQ followed by relaunch must restore every group's PDFs")
+            try require(nextLaunch.activeReaders[bID]?.documentURL == second,
+                        "\(name): a group's selected PDF must survive CmdQ and relaunch")
+            print("PASS: isolated \(name) startup, external-open merge, quit-before-close snapshot and relaunch")
+        }
+        let (interrupted, interruptedFile) = try makeLaunch("quit-during-startup", data: baselineData)
+        _ = interrupted.applicationShouldTerminate(NSApp)
+        await interrupted.completeStartup(opening: [third])
+        let interruptedData = try Data(contentsOf: interruptedFile)
+        try require(interruptedData == baselineData && interrupted.readers.isEmpty,
+                    "Quitting before startup finishes must preserve the previous session")
+        closeFixture(interrupted)
+        let missing = directory.appendingPathComponent("missing.pdf")
+        let legacyData = Data("{\"formatVersion\":1,\"documentPaths\":[\"\(first.path)\",\"\(missing.path)\",\"\(second.path)\"],\"activeDocumentPath\":\"\(second.path)\",\"updatedAt\":\"2026-11-05T00:00:00Z\"}".utf8)
+        let (legacy, _) = try makeLaunch("legacy", data: legacyData)
+        await legacy.completeStartup()
+        try require(legacy.orderedReaders(in: ReaderTabGroups.defaultID).map(\.documentURL) == [first, second]
+                    && legacy.activeReaders[ReaderTabGroups.defaultID]?.documentURL == second,
+                    "Legacy sessions must restore surviving files in order and skip missing PDFs")
+        closeFixture(legacy)
+        for (name, data) in [("future", Data("{\"formatVersion\":999,\"documentPaths\":[],\"updatedAt\":\"2026-11-05T00:00:00Z\"}".utf8)),
+                             ("corrupt", Data("not JSON".utf8))] {
+            let (protected, file) = try makeLaunch(name, data: data)
+            await protected.completeStartup(opening: [third])
+            _ = protected.applicationShouldTerminate(NSApp)
+            let afterQuit = try Data(contentsOf: file)
+            try require(afterQuit == data && protected.readers.count == 1,
+                        "\(name): external open and quit must preserve unreadable session bytes")
+            closeFixture(protected)
+        }
+        let (fresh, _) = try makeLaunch("first-launch", data: nil)
+        await fresh.completeStartup()
+        try require(fresh.readers.isEmpty && fresh.activeGroupID == ReaderTabGroups.defaultID && fresh.workspace.window.isVisible,
+                    "First launch must show an empty Default workspace")
+        closeFixture(fresh)
+        print("PASS: interrupted startup, legacy/missing files, unreadable sessions and first launch")
+
         let reloaded = AppDelegate()
-        reloaded.groupLibrary = try await reloaded.paperLibraryStore.snapshot()
-        try require(reloaded.restoreLastSessionIfEnabled(enabled: true), "Grouped session must restore")
-        try require(reloaded.activeGroupID == ReaderTabGroups.defaultID && reloaded.readers.count == 3, "Restoration must initially select Default while preserving every group's documents")
+        // Even a previously disabled preference must not disable restoration.
+        UserDefaults.standard.set(false, forKey: "reader.restoreLastSession")
+        await reloaded.completeStartup()
+        try require(reloaded.hasCompletedStartup && reloaded.readers.count == 4, "Every launch must restore every group's PDFs, including an old disabled preference")
+        try require(reloaded.activeGroupID == ReaderTabGroups.defaultID && reloaded.readers.count == 4, "Restoration must initially select Default while preserving every group's documents")
         try require(reloaded.emptyGroupWindow?.window?.isVisible == true && reloaded.readers.allSatisfy { $0.window?.isVisible == false }, "Restored launch must show only the empty Default workspace")
         try require(reloaded.activeReaders[aID]?.documentURL == second && reloaded.activeReaders[bID]?.documentURL == first, "Restoration must preserve each background group's active document")
         reloaded.selectGroup(aID)
         try require(reloaded.activeReaders[aID]?.window?.isVisible == true, "Restored background group must remain accessible")
-        for reader in reloaded.readers {
-            let peerWindows = reader.window?.tabGroup?.windows ?? [reader.window!]
-            try require(peerWindows.allSatisfy { window in reloaded.readers.contains { $0.window === window && reloaded.groupID(for: $0) == reloaded.groupID(for: reader) } }, "Restoration must never merge document tabs across groups")
+        try requireNoNativeTabs(reloaded)
+        try require(reloaded.orderedReaders(in: bID).count == 2, "Restoration must preserve both PDFs in a multi-document group")
+        for id in [aID, bID, emptyID, ReaderTabGroups.defaultID, aID] {
+            reloaded.selectGroup(id)
+            try await Task.sleep(for: .milliseconds(50))
+            try requireNoNativeTabs(reloaded)
         }
+        func answerNextCloseAlert(_ response: NSApplication.ModalResponse) {
+            let timer = Timer(timeInterval: 0.05, repeats: false) { _ in
+                MainActor.assumeIsolated { NSApp.stopModal(withCode: response) }
+            }
+            RunLoop.main.add(timer, forMode: .modalPanel)
+        }
+        fputs("CHECK: close cancel/save/discard\n", stderr)
+        let closing = reloaded.activeReaders[aID]!
+        let closingFile = closing.documentURL
+        let beforeSave = try Data(contentsOf: closingFile)
+        try await closing.addWorkspaceAnnotationSelfCheck()
+        try require(reloaded.workspace.window.isDocumentEdited, "Annotation must mark the visible document dirty")
+        reloaded.selectGroup(bID)
+        try require(closing.window?.isDocumentEdited == true, "Hidden document must retain its dirty state")
+        reloaded.selectGroup(aID)
+        try require(reloaded.workspace.window.isDocumentEdited, "Returning must restore the dirty indicator")
+        answerNextCloseAlert(.alertSecondButtonReturn)
+        reloaded.workspace.window.performClose(nil)
+        fputs("CHECK: cancel returned\n", stderr)
+        try require(reloaded.readers.contains { $0 === closing } && closing.window === reloaded.workspace.window,
+                    "Cancel must keep the active document and workspace intact")
+        answerNextCloseAlert(.alertFirstButtonReturn)
+        reloaded.workspace.window.performClose(nil)
+        for _ in 0..<100 {
+            if !reloaded.readers.contains(where: { $0 === closing }) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try require(!reloaded.readers.contains { $0 === closing }, "Save must close only the saved document")
+        let afterSave = try Data(contentsOf: closingFile)
+        fputs("CHECK: saved annotation\n", stderr)
+        try require(afterSave != beforeSave, "Save-before-close must write the PDF annotation")
+        try require(reloaded.workspace.window.isVisible && reloaded.emptyGroupWindow?.window === reloaded.workspace.window,
+                    "Closing the last document must retain the host and show the empty group")
+        reloaded.selectGroup(bID)
+        let discarded = reloaded.activeReaders[bID]!
+        let beforeDiscard = try Data(contentsOf: discarded.documentURL)
+        try await discarded.addWorkspaceAnnotationSelfCheck()
+        answerNextCloseAlert(.alertThirdButtonReturn)
+        reloaded.workspace.window.performClose(nil)
+        try require(!reloaded.readers.contains { $0 === discarded }, "Discard must close the selected document")
+        let afterDiscard = try Data(contentsOf: discarded.documentURL)
+        try require(afterDiscard == beforeDiscard, "Discard must leave the PDF unchanged")
         reloaded.isTerminating = true
         reloaded.isSwitchingGroup = true
         for reader in reloaded.readers { reader.close() }
@@ -1264,10 +1415,10 @@ extension AppDelegate {
         let sessionFile = directory.appendingPathComponent("session.json")
         let futureSession = Data("{\"formatVersion\":999,\"documentPaths\":[],\"updatedAt\":\"2026-11-05T00:00:00Z\"}".utf8)
         try futureSession.write(to: sessionFile)
-        try require(!app.restoreLastSessionIfEnabled(enabled: true), "Unsupported future sessions must not be restored")
+        try require(!app.restoreLastSession(), "Unsupported future sessions must not be restored")
         app.saveCurrentSession()
         let untouched = try Data(contentsOf: sessionFile)
         try require(untouched == futureSession, "Unsupported session data must not be overwritten")
-        print("PASS: native group tabs isolate active/reuse routes, empty groups, Library opens/moves/renames/deletions and grouped session restore")
+        print("PASS: stable workspace without native tabs isolates active/reuse routes, empty groups, Library opens/moves/renames/deletions and grouped session restore")
     }
 }

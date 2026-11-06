@@ -51,6 +51,24 @@ public final class LocalWebBridge: @unchecked Sendable {
         )
     }
 
+    /// Resolves the web service required by a model route. The Magpie
+    /// forwarding endpoint can be healthy while its uwa-lite dependency is down.
+    /// Other local APIs are not uwa-lite and must not be started by this helper.
+    public func bridgeEndpoint(for configuration: AIProviderConfiguration) -> Endpoint? {
+        guard AIConversationRouting.usesWebGateway(configuration),
+              let endpoint = bridgeEndpoint(from: configuration.baseURL) else { return nil }
+        if endpoint.port == 3425 {
+            return Endpoint(scheme: "http", host: "127.0.0.1", port: 8199)
+        }
+        return endpoint
+    }
+
+    public func ensureReady(for configuration: AIProviderConfiguration) async -> Bool {
+        guard let endpoint = bridgeEndpoint(for: configuration) else { return true }
+        guard let url = endpoint.healthURL else { return false }
+        return await ensureReady(for: url.absoluteString)
+    }
+
     /// Ensures a bridge answers on the endpoint of `baseURL`. Returns true
     /// when the URL is remote (nothing to do) or the service is healthy.
     public func ensureReady(for baseURL: String) async -> Bool {

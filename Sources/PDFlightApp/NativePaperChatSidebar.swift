@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// Native paper conversation. The engine, history and drafts are owned by PDFlight.
 @MainActor
-final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
+final class NativePaperChatSidebar: NSView, NSTextViewDelegate, ChatHeavyViewOwner {
     static let customRouteID = "__pdflight_custom_model__"
     static func rendererResourceSelfCheck() throws {
         func require(_ condition: Bool, _ text: String) throws {
@@ -63,6 +63,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             preview.close()
         }
         missing.close()
+        try heavyViewLifecycleSelfCheck()
+        if ProcessInfo.processInfo.environment["PDFLIGHT_CHAT_CACHE_WEB_CHECK"] == "1" {
+            try heavyWebViewLifecycleSelfCheck()
+        }
     }
     static func selfCheck() throws {
         try NativeModelPopover.selfCheck()
@@ -373,6 +377,19 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private var assistantFooters: [String: NSStackView] = [:]
     private var footerButtonSizes: [NSLayoutConstraint] = []
     private var feedbackButtons: [String: (NSButton, NSButton)] = [:]
+    private var transcript: [AIChatMessage] = []
+    private var nativeTranscriptDirty = false
+    private var eagerNativeFixture = false
+    private var nativeFallback = false
+    private var isChatActive = false
+    private var isChatClosed = false
+    private var restoringNativeTranscript = false
+    private var nativeScrollOrigin: NSPoint?
+
+    private var shouldRenderNative: Bool {
+        (eagerNativeFixture || isChatActive) && (harnessPreview == nil || nativeFallback)
+    }
+
     private var attachments: [AIChatImageAttachment] = []
     private var includePDF = false
     private var additionalPDFPaths: [String] = []
@@ -420,11 +437,13 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         setup()
     }
     private init(frame: NSRect, harnessPreviewEnabled: Bool) {
+        eagerNativeFixture = !harnessPreviewEnabled
         harnessPreview = harnessPreviewEnabled ? HarnessChatPreview() : nil
         super.init(frame: frame)
         setup()
     }
     private init(frame: NSRect, preview: HarnessChatPreview) {
+        eagerNativeFixture = true
         harnessPreview = preview
         super.init(frame: frame)
         setup()
@@ -646,6 +665,9 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             transcript.spacing = 4
             harnessPreview.onRenderingStateChanged = { [weak self, weak harnessPreview] ready, explanation in
                 guard let self else { return }
+                self.nativeFallback = harnessPreview?.hasRenderingFailure == true
+                if ready { self.clearNativeTranscript() }
+                else if self.nativeFallback { self.materializeNativeTranscript() }
                 self.messagesScroll.isHidden = ready
                 harnessPreview?.isHidden = !ready
                 self.rendererNotice.stringValue = explanation ?? ""
@@ -752,8 +774,49 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
     private func divider() -> NSView { let view = NSBox(); view.boxType = .separator; return view }
     func setPaperTitle(_ title: String) { paperTitle = title; if includePDF { updateAttachments() } }
     func setReferenceDirectory(_ directory: URL) { referenceDirectory = directory }
-    func activate() { harnessPreview?.activate() }
-    func close() { harnessPreview?.close(); modelPanel?.dismiss(); modelPanel = nil }
+    // Workspace roots remain in the same NSWindow. AppKit propagates these
+    // notifications when an ancestor root is hidden or shown.
+    override func viewDidHide() {
+        super.viewDidHide()
+        pauseChatPresentation()
+    }
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        activate()
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { pauseChatPresentation() }
+    }
+
+    private func pauseChatPresentation() {
+        isChatActive = false
+        nativeScrollOrigin = messagesScroll.contentView.bounds.origin
+        harnessPreview?.deactivate()
+        ChatHeavyViewCache.shared.deactivate(self)
+    }
+
+    func activate() {
+        guard !isChatClosed, window != nil, !isHiddenOrHasHiddenAncestor else { return }
+        isChatActive = true
+        ChatHeavyViewCache.shared.activate(self)
+        materializeNativeTranscript()
+        harnessPreview?.activate()
+    }
+
+    func discardHeavyChatViews() {
+        harnessPreview?.discardRenderer()
+        clearNativeTranscript()
+        nativeTranscriptDirty = true
+    }
+
+    func close() {
+        isChatClosed = true
+        pauseChatPresentation()
+        ChatHeavyViewCache.shared.remove(self)
+        harnessPreview?.close()
+        modelPanel?.dismiss(); modelPanel = nil
+    }
     func setModelTitle(_ title: String) {
         composerModelTitle = title.isEmpty ? "选择模型" : title
         if harnessPreview != nil { updateHarnessComposerToolbar(); return }
@@ -881,13 +944,45 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         presetPopup.removeAllItems(); for value in templates { presetPopup.addItem(withTitle: value.name); presetPopup.lastItem?.representedObject = value.id }
         if let index = templates.firstIndex(where: { $0.id == selectedPreset.rawValue }) { presetPopup.selectItem(at: index) }
     }
-    func install(_ values: [AIChatMessage]) {
-        harnessPreview?.replace([])
+    private func clearNativeTranscript() {
+        nativeTranscriptDirty = true
         messagesStack.arrangedSubviews.forEach { messagesStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        messages.removeAll(); messageRows.removeAll(); messageContents.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); messageActivityStarted.removeAll(); messageActivityText.removeAll(); assistantFooters.removeAll(); footerButtonSizes.removeAll(); feedbackButtons.removeAll(); values.forEach(append)
+        messages.removeAll(); messageRows.removeAll(); userBubbleWidths.removeAll(); userBubbleHasImages.removeAll(); reasoningViews.removeAll(); reasoningButtons.removeAll(); assistantFooters.removeAll(); footerButtonSizes.removeAll(); feedbackButtons.removeAll()
+    }
+
+    private func materializeNativeTranscript() {
+        guard shouldRenderNative, nativeTranscriptDirty else { return }
+        clearNativeTranscript()
+        restoringNativeTranscript = true
+        transcript.forEach(renderNativeMessage)
+        restoringNativeTranscript = false
+        nativeTranscriptDirty = false
+        layoutSubtreeIfNeeded()
+        if let origin = nativeScrollOrigin {
+            messagesScroll.contentView.scroll(to: origin)
+            messagesScroll.reflectScrolledClipView(messagesScroll.contentView)
+        } else { scrollToBottom() }
+    }
+
+    func install(_ values: [AIChatMessage]) {
+        transcript = values
+        messageActivityStarted.removeAll(); messageActivityText.removeAll()
+        messageContents = Dictionary(values.map { ($0.id, $0.content) }, uniquingKeysWith: { _, next in next })
+        nativeScrollOrigin = nil
+        harnessPreview?.replace(values)
+        clearNativeTranscript()
+        nativeTranscriptDirty = true
+        materializeNativeTranscript()
     }
     func append(_ message: AIChatMessage) {
+        transcript.append(message)
+        messageContents[message.id] = message.content
         harnessPreview?.append(message)
+        guard shouldRenderNative else { nativeTranscriptDirty = true; return }
+        if nativeTranscriptDirty { materializeNativeTranscript() }
+        else { renderNativeMessage(message) }
+    }
+    private func renderNativeMessage(_ message: AIChatMessage) {
         let rendered = AIChatRenderedContentView(); rendered.translatesAutoresizingMaskIntoConstraints = false; rendered.alignment = .width
         rendered.useHarnessTypography()
         rendered.setContent(message.content, renderMarkdown: message.role == .assistant)
@@ -976,12 +1071,25 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
             if hasAttachments { userBubbleHasImages.insert(message.id) }
         }
         messages[message.id] = rendered; messageRows[message.id] = row; messageContents[message.id] = message.content
-        DispatchQueue.main.async { [weak self] in self?.scrollToBottom() }
+        if message.role == .assistant { updateReasoningButton(id: message.id) }
+        if !restoringNativeTranscript {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, shouldRenderNative else { return }
+                scrollToBottom()
+            }
+        }
     }
-    func updateMessage(id: String, content: String, renderMarkdown: Bool = false) { harnessPreview?.update(id: id, content: content); messageContents[id] = content; messages[id]?.setContent(content, renderMarkdown: renderMarkdown); assistantFooters[id]?.isHidden = content.isEmpty }
-    func updateReasoning(id: String, content: String) { harnessPreview?.updateReasoning(id: id, content: content); reasoningViews[id]?.stringValue = content; updateReasoningButton(id: id) }
+    private func updateTranscript(id: String, _ update: (inout AIChatMessage) -> Void) {
+        guard let index = transcript.firstIndex(where: { $0.id == id }) else { return }
+        update(&transcript[index])
+        if !shouldRenderNative { nativeTranscriptDirty = true }
+    }
+    func updateMessage(id: String, content: String, renderMarkdown: Bool = false) { updateTranscript(id: id) { $0.content = content }; harnessPreview?.update(id: id, content: content); messageContents[id] = content; if shouldRenderNative { messages[id]?.setContent(content, renderMarkdown: renderMarkdown) }; assistantFooters[id]?.isHidden = content.isEmpty }
+    func updateReasoning(id: String, content: String) { updateTranscript(id: id) { $0.reasoning = content }; harnessPreview?.updateReasoning(id: id, content: content); if shouldRenderNative { reasoningViews[id]?.stringValue = content; updateReasoningButton(id: id) } }
     func updateToolEvent(id: String, event: AIChatToolEvent) {
+        updateTranscript(id: id) { $0.toolEvent = event }
         harnessPreview?.updateTool(id: id, event: event)
+        guard shouldRenderNative else { return }
         reasoningViews[id]?.stringValue = "输入\n" + event.arguments + (event.result.map { "\n\n结果\n" + $0 } ?? "")
         reasoningButtons[id]?.title = (reasoningViews[id]?.isHidden == false ? "▾" : "▸") + " 工具 · " + event.name + (event.isError ? "（失败）" : "")
     }
@@ -991,7 +1099,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         let widest = text.components(separatedBy: "\n").map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
         return max(hasImages ? 180 : 44, ceil(widest) + 32)
     }
-    func removeMessage(id: String) { harnessPreview?.remove(id: id); if let row = messageRows.removeValue(forKey: id) { messagesStack.removeArrangedSubview(row); row.removeFromSuperview() }; messages.removeValue(forKey: id); messageContents.removeValue(forKey: id); userBubbleWidths.removeValue(forKey: id); userBubbleHasImages.remove(id); reasoningViews.removeValue(forKey: id); reasoningButtons.removeValue(forKey: id); messageActivityStarted.removeValue(forKey: id); messageActivityText.removeValue(forKey: id) }
+    func removeMessage(id: String) { transcript.removeAll { $0.id == id }; harnessPreview?.remove(id: id); if let row = messageRows.removeValue(forKey: id) { messagesStack.removeArrangedSubview(row); row.removeFromSuperview() }; messages.removeValue(forKey: id); messageContents.removeValue(forKey: id); userBubbleWidths.removeValue(forKey: id); userBubbleHasImages.remove(id); reasoningViews.removeValue(forKey: id); reasoningButtons.removeValue(forKey: id); messageActivityStarted.removeValue(forKey: id); messageActivityText.removeValue(forKey: id) }
     func setActivity(_ phase: AIChatActivityPhase, detail: String) {
         switch phase {
         case .ready, .completed: statusLabel.stringValue = ""
@@ -1025,7 +1133,10 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         case .waiting: messageActivityText[id] = "等待模型回复…"
         case .thinking: messageActivityText[id] = "思考中…"
         case .answering: messageActivityText[id] = "正在回复…"
-        case .completed: messageActivityText[id] = Self.completedActivity(Date().timeIntervalSince(messageActivityStarted[id] ?? Date()))
+        case .completed:
+            let elapsed = Date().timeIntervalSince(messageActivityStarted[id] ?? Date())
+            messageActivityText[id] = Self.completedActivity(elapsed)
+            updateTranscript(id: id) { $0.elapsedSeconds = elapsed }
         case .stopped: messageActivityText[id] = "已停止"
         case .failed: messageActivityText[id] = "请求失败"
         case .ready, .loading: break
@@ -1207,6 +1318,7 @@ final class NativePaperChatSidebar: NSView, NSTextViewDelegate {
         guard let id = sender.identifier?.rawValue, let pair = feedbackButtons[id] else { return }
         let value: String? = sender.state == .on ? (sender.tag == 1 ? "positive" : "negative") : nil
         pair.0.state = value == "positive" ? .on : .off; pair.1.state = value == "negative" ? .on : .off
+        updateTranscript(id: id) { $0.feedback = value }
         onFeedback?(id, value)
     }
     @objc private func branchMessage(_ sender: NSButton) { if let id = sender.identifier?.rawValue { onBranchMessage?(id) } }
@@ -1577,4 +1689,175 @@ private final class NativePaperChatResizeHandle: NSView {
     override func mouseDown(with event: NSEvent) { previous = event.locationInWindow.x }
     override func mouseDragged(with event: NSEvent) { let x = event.locationInWindow.x; if let previous { onDrag?(x - previous) }; previous = x }
     override func mouseUp(with event: NSEvent) { previous = nil; onEnd?() }
+}
+
+@MainActor
+extension NativePaperChatSidebar {
+    func prepareWorkspaceSelfCheck() async throws -> (@MainActor () async throws -> Void) {
+        let answer = "Workspace synthetic saved answer"
+        install([AIChatMessage(id: "workspace-answer", role: .assistant, content: answer)])
+        restoreDraft("Workspace unsent draft", attachments: [], includePDF: false)
+        activate()
+        guard let preview = harnessPreview else {
+            throw NSError(domain: "WorkspaceChatCheck", code: 4)
+        }
+        let renderer = try await preview.workspaceRenderingSelfCheck(expectedText: answer)
+        return { [self] in
+            guard composer.string == "Workspace unsent draft",
+                  messageContents["workspace-answer"] == answer,
+                  try await preview.workspaceRenderingSelfCheck(expectedText: answer) == renderer else {
+                throw NSError(domain: "WorkspaceChatCheck", code: 5,
+                    userInfo: [NSLocalizedDescriptionKey: "Group switching must preserve chat renderer, history and draft"])
+            }
+        }
+    }
+}
+
+
+@MainActor
+extension NativePaperChatSidebar {
+    /// Synthetic, unshown window; no document controller, history store, model
+    /// provider, session restoration or user paper is opened by this check.
+    private static func heavyViewLifecycleSelfCheck() throws {
+        func require(_ value: Bool, _ detail: String) throws {
+            if !value { throw NSError(domain: "ChatCacheCheck", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: detail]) }
+        }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 700),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        let host = NSView(frame: window.contentView!.bounds)
+        window.contentView = host
+        var roots: [NSView] = []
+        var sidebars: [NativePaperChatSidebar] = []
+        for index in 0..<3 {
+            let sidebar = NativePaperChatSidebar(frame: host.bounds)
+            // Force the supported native fallback without creating a WKWebView.
+            sidebar.harnessPreview?.renderingFailed("Synthetic native fallback")
+            sidebar.install([AIChatMessage(id: "answer", role: .assistant,
+                content: String(repeating: "Synthetic answer \(index).\n\n", count: 60))])
+            sidebar.restoreDraft("Unsent \(index)", attachments: [], includePDF: false)
+            sidebar.chatZoom = 1.25
+            try require(sidebar.messageRows.isEmpty, "Cold papers must not build Markdown views")
+            let root = NSView(frame: host.bounds)
+            root.isHidden = true
+            root.addSubview(sidebar)
+            host.addSubview(root)
+            roots.append(root); sidebars.append(sidebar)
+        }
+        defer {
+            sidebars.forEach { $0.close() }
+            window.contentView = nil
+        }
+        func show(_ index: Int) {
+            autoreleasepool {
+                for candidate in roots.indices where candidate != index { roots[candidate].isHidden = true }
+                roots[index].isHidden = false
+                host.layoutSubtreeIfNeeded()
+            }
+        }
+        let a = sidebars[0], b = sidebars[1], c = sidebars[2]
+        show(0)
+        try require(a.isChatActive && a.messageRows.count == 1, "Ancestor unhide must activate chat")
+        a.messagesScroll.contentView.scroll(to: NSPoint(x: 0, y: 45))
+        let origin = a.messagesScroll.contentView.bounds.origin
+        weak let originalRow = a.messageRows["answer"]
+        show(1)
+        try require(!a.isChatActive && b.isChatActive, "Ancestor hide must pause the old chat")
+        show(0)
+        try require(a.messageRows["answer"] === originalRow, "A → B → A must reuse the recent view")
+        show(1)
+        show(2)
+        try require(a.messageRows.isEmpty && originalRow == nil,
+                    "The third paper must release the oldest native message views (rows: \(a.messageRows.count), retained row: \(originalRow != nil))")
+        a.updateMessage(id: "answer", content: "Synthetic background completion")
+        a.updateReasoning(id: "answer", content: "Synthetic background reasoning")
+        try require(a.messageRows.isEmpty, "Background stream updates must not recreate evicted views")
+        show(0)
+        try require(a.messages["answer"]?.renderedTextForLayoutCheck().contains("Synthetic background completion") == true,
+                    "Reactivation must render the latest background message")
+        try require(a.transcript.first?.reasoning == "Synthetic background reasoning" &&
+                    a.composer.string == "Unsent 0" && a.chatZoom == 1.25 && a.nativeScrollOrigin == origin,
+                    "Draft, reasoning, zoom and native scroll must outlive eviction")
+        try require(ChatHeavyViewCache.shared.residentCount == 2 && c.messageRows.isEmpty == false,
+                    "Only current and most recent views may be resident")
+        print("PASS: lazy chat lifecycle, current + recent budget, ancestor visibility, draft/zoom/scroll and background updates")
+    }
+}
+
+
+@MainActor
+extension NativePaperChatSidebar {
+    private static func heavyWebViewLifecycleSelfCheck() throws {
+        func require(_ value: Bool, _ detail: String) throws {
+            if !value { throw NSError(domain: "ChatWebCacheCheck", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: detail]) }
+        }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 700),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        let host = NSView(frame: window.contentView!.bounds)
+        window.contentView = host
+        let answer = String(repeating: "Synthetic saved answer.\n\n", count: 80)
+        let sidebars = (0..<3).map { _ in NativePaperChatSidebar(frame: host.bounds) }
+        let roots = sidebars.map { sidebar in
+            let root = NSView(frame: host.bounds)
+            root.isHidden = true
+            root.addSubview(sidebar); host.addSubview(root)
+            sidebar.install([AIChatMessage(id: "answer", role: .assistant, content: answer)])
+            sidebar.restoreDraft("Synthetic web draft", attachments: [], includePDF: false)
+            sidebar.chatZoom = 1.25
+            sidebar.harnessPreview?.setZoom(1.25)
+            return root
+        }
+        defer {
+            sidebars.forEach { $0.close() }
+            window.contentView = nil
+        }
+        func show(_ index: Int) throws {
+            autoreleasepool {
+                for candidate in roots.indices where candidate != index { roots[candidate].isHidden = true }
+                roots[index].isHidden = false
+                host.layoutSubtreeIfNeeded()
+            }
+            try sidebars[index].harnessPreview!.waitForSelfCheck(
+                "document.body.innerText.includes('Synthetic saved answer')", matches: { $0 as? Bool == true })
+        }
+        let previews = sidebars.map { $0.harnessPreview! }
+        try require(previews.allSatisfy { $0.rendererIdentityForSelfCheck == nil },
+                    "Cold papers must not allocate WebKit renderers")
+        try show(0)
+        let firstRenderer = previews[0].rendererIdentityForSelfCheck
+        let scroller = "[...document.querySelectorAll('#chat-body *')].find(e => e.scrollHeight > e.clientHeight + 20 && getComputedStyle(e).overflowY !== 'visible')"
+        try previews[0].waitForSelfCheck("(() => {const e = \(scroller); if (!e) return false; e.scrollTop = 90; return e.scrollTop === 90;})()", matches: { $0 as? Bool == true })
+        // Give the real DOM scroll event time to cross the WebKit bridge.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        try require(previews[0].hasSavedScrollForSelfCheck, "Reader scroll must reach the semantic scroll store")
+        var savedAnchorTop = 0.0
+        let anchorScript = "(() => {const e = \(scroller); const a = document.querySelector('[data-chat-anchor-key=\"answer\"]'); return a && e ? a.getBoundingClientRect().top-e.getBoundingClientRect().top : null;})()"
+        try previews[0].waitForSelfCheck(anchorScript, matches: { value in
+            guard let top = value as? Double else { return false }
+            savedAnchorTop = top
+            return true
+        })
+        try show(1); try show(0)
+        try require(previews[0].rendererIdentityForSelfCheck == firstRenderer,
+                    "The recent WebKit renderer must be reused")
+        try previews[0].waitForSelfCheck("(\(scroller))?.scrollTop", matches: { abs(($0 as? Double ?? -100) - 90) < 2 })
+        print("PASS: recent WebKit renderer retained its scroll")
+        try show(1); try show(2)
+        try require(previews[0].rendererIdentityForSelfCheck == nil &&
+                    previews.filter { $0.rendererIdentityForSelfCheck != nil }.count == 2,
+                    "A third paper must discard the oldest WebKit renderer")
+        sidebars[0].updateMessage(id: "answer", content: answer + "Background synthetic completion")
+        try require(previews[0].rendererIdentityForSelfCheck == nil,
+                    "Background streaming must not allocate WebKit")
+        try show(0)
+        try previews[0].waitForSelfCheck("document.body.innerText.includes('Background synthetic completion')", matches: { $0 as? Bool == true })
+        try previews[0].waitForSelfCheck("Boolean(document.querySelector('[data-chat-zoom=\"1.25\"]'))", matches: { $0 as? Bool == true })
+        // Harness restores the visible anchor in viewport pixels. Under
+        // WebKit's scaled layout, scrollTop alone is not that coordinate.
+        try previews[0].waitForSelfCheck(anchorScript, matches: { abs(($0 as? Double ?? -10000) - savedAnchorTop) < 2 })
+        try require(sidebars[0].composer.string == "Synthetic web draft" && sidebars[0].messageRows.isEmpty,
+                    "A recreated renderer must preserve the draft without a duplicate native transcript")
+        print("PASS: real WebKit lazy allocation, recent reuse, bounded eviction, scroll/zoom restoration and background completion")
+    }
 }

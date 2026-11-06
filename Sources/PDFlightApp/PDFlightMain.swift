@@ -6,6 +6,19 @@ import PDFlightAI
 enum PDFlightMain {
     @MainActor
     static func main() {
+        let supportedSelfChecks: Set<String> = [
+            "--self-check-chat-renderer",
+            "--self-check-group-tabs",
+            "--self-check-sidebar-layout",
+            "--self-check-math-rendering",
+            "--self-check-native-paper-chat"
+        ]
+        if CommandLine.arguments.dropFirst().contains(where: {
+            $0.hasPrefix("--self-check") && !supportedSelfChecks.contains($0)
+        }) {
+            fputs("Unknown --self-check option. Refusing to start a reading session.\n", stderr)
+            exit(EX_USAGE)
+        }
         if CommandLine.arguments.contains("--self-check-chat-renderer") {
             do {
                 try NativePaperChatSidebar.rendererResourceSelfCheck()

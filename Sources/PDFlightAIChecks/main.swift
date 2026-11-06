@@ -10,6 +10,11 @@ private struct SlowTestSecretStore: AISecretStore {
 @main
 enum PDFlightAIChecks {
     static func main() async throws {
+        if CommandLine.arguments.contains("--local-web-bridge-only") {
+            try await localWebBridgeEndpointsAndReadiness()
+            print("PASS: local web bridge route dependencies and readiness")
+            return
+        }
         if CommandLine.arguments.contains("--paper-import-recovery-only") {
             try await PaperImportQueueChecks.recoveryOnly()
             return
@@ -1363,6 +1368,17 @@ enum PDFlightAIChecks {
 
     private static func localWebBridgeEndpointsAndReadiness() async throws {
         let bridge = LocalWebBridge()
+        let forwarded = AIProviderConfiguration(baseURL: "http://127.0.0.1:3425/v1", model: "uwa-lite-local/qwen")
+        try check(
+            bridge.bridgeEndpoint(for: forwarded) == LocalWebBridge.Endpoint(scheme: "http", host: "127.0.0.1", port: 8199),
+            "a healthy forwarding port must still prepare the downstream web bridge on 8199"
+        )
+        let direct = AIProviderConfiguration(baseURL: "http://127.0.0.1:8199/v1", model: "qwen")
+        try check(bridge.bridgeEndpoint(for: direct)?.port == 8199, "direct web routes must preserve their bridge endpoint")
+        let nativeProxy = AIProviderConfiguration(baseURL: "http://127.0.0.1:3425/v1", model: "native-model")
+        try check(bridge.bridgeEndpoint(for: nativeProxy) == nil, "non-web models must not start uwa-lite on the forwarding port")
+        let nativeReady = await bridge.ensureReady(for: nativeProxy)
+        try check(nativeReady, "non-web routes must skip uwa-lite startup")
         try check(
             bridge.bridgeEndpoint(from: "https://api.openai.com/v1") == nil,
             "expected remote provider URLs to skip the local bridge"

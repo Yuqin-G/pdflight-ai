@@ -19,7 +19,23 @@ let order=[...nodes.keys()], chatData={order,nodes,navigation:{items:()=>[]}};
 const session={blank:false,awaitingFirstTurn:false,running:false,openState:'open',openError:null,hasMore:false,loadingOlder:false,pendingSubmissions:[]};
 const useSession=f=>f(session), useChat=f=>f(chatData), useConversation=f=>f({activeTargets:new Set(),views:{grouped:()=>undefined}}),useSessions=f=>f({byId:{local:{cwd:''}}}),usePresentation=f=>f({mode:'chat',collapseTiming:'immediate'}),useProjection=(key,f)=>f?f(undefined):undefined;
 const t=(key, values)=>{let v=chat.PDLocale[key]??key;if(values) for(const [k,x] of Object.entries(values))v=v.replaceAll('{'+k+'}',String(x));return v;};
-const useGroupAction=()=>React.useRef(null), useStore=f=>f({}), chatScroll={read:()=>null,save:()=>{}};
+let scrollPosition=null, scrollGeneration=0;
+function scrollStore(position){
+ let saved=position;
+ const generation=++scrollGeneration;
+ return {read:()=>{
+  // WebKit's scaled getBoundingClientRect and scrollTop use different units.
+  // Use Harness's missing-anchor fallback to restore the saved scroll offset;
+  // feeding its scaled anchorTop back into align() applies the zoom twice.
+  return isHarnessWebKit && saved!==null ? {...saved,anchorKey:''} : saved;
+ },save:position=>{
+  saved=position;
+  if(generation!==scrollGeneration)return;
+  scrollPosition=position;
+  window.webkit?.messageHandlers?.harnessScroll?.postMessage({position});
+ }};
+}
+const useGroupAction=()=>React.useRef(null), useStore=f=>f({}), chatScroll=scrollStore(null);
 function renderUserTextNode(name,p,options){
  const fallback=options.fallback;
  if(!isHarnessWebKit||name!=='conversation.user.text.node'||p.node.id!=='text'||typeof fallback?.props?.text!=='string')return fallback;
@@ -81,14 +97,15 @@ function ChatBody({revision}) {
  return React.createElement('div',{className:'pr-workspace',style:{display:'flex'}},React.createElement('section',{className:'pr-chat',style:{flex:1}},React.createElement('div',{ref,id:'chat-body',className:'pr-native-chat',style:compatibilityLengths},React.createElement(conv.PDContent,{...contentProps,key:revision}))));
 }
 let revision=0;
-window.PDFlightReplaceMessages=items=>{
- const scroller=[...document.querySelectorAll('#chat-body *')].find(e=>e.scrollHeight>e.clientHeight+20 && getComputedStyle(e).overflowY!=='visible');
- const previous=scroller?{top:scroller.scrollTop,bottom:scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<20}:null;
+window.PDFlightReplaceMessages=(items,position=scrollPosition)=>{
+ // Feed Harness its own semantic reading position before it mounts a new
+ // revision, so its layout lifecycle restores the anchor instead of the tail.
+ scrollPosition=position;
+ props.chatScroll=scrollStore(position);
  data=items.map(m=>m.role==='tool'?{...m,role:'assistant',content:'**工具 · '+(m.toolEvent?.name??'')+'**\n\n'+(m.toolEvent?.arguments??'')+'\n\n'+(m.toolEvent?.result??'')}:m);
  nodes=new Map(data.map((m,i)=>[m.id,{key:m.id,kind:m.role,location:{kind:'session'},anchorSeq:i,data:m.role==='assistant'?{blocks:[{kind:'text',text:m.content}],status:'done'}:{content:[{type:'text',text:m.content}],time:new Date(m.createdAt).getTime()}}]));
  order=[...nodes.keys()];chatData={order,nodes,navigation:{items:()=>[]}};
  root.render(React.createElement(ChatBody,{revision:++revision}));
- if(previous)requestAnimationFrame(()=>{const next=[...document.querySelectorAll('#chat-body *')].find(e=>e.scrollHeight>e.clientHeight+20 && getComputedStyle(e).overflowY!=='visible');if(next)next.scrollTop=previous.bottom?next.scrollHeight:previous.top});
 };
 window.PDFlightReplaceMessages([]);
 function apply(next){window.__setChatZoom(next)}
